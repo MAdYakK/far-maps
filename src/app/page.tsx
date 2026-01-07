@@ -1,29 +1,35 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { LatLngExpression } from "leaflet";
 import dynamic from "next/dynamic";
+import type { ComponentType } from "react";
+import type { LatLngExpression } from "leaflet";
 import { sdk } from "@farcaster/miniapp-sdk";
+import type { Point } from "@/components/LeafletMap";
 
-type Point = {
-  fid: number;
-  username: string;
-  display_name?: string;
-  pfp_url?: string;
-  city: string;
-  lat: number;
-  lng: number;
-};
-
-// ✅ This prevents Leaflet from ever loading during SSR/prerender
-const LeafletMap = dynamic(() => import("@/components/LeafletMap"), {
-  ssr: false,
-  loading: () => (
-    <div style={{ height: "100%", width: "100%", display: "grid", placeItems: "center" }}>
-      Loading map…
-    </div>
-  ),
-});
+// ✅ Leaflet loads ONLY in the browser (prevents Vercel "window is not defined")
+const LeafletMap = dynamic(
+  () => import("@/components/LeafletMap").then((m) => m.default),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        Loading map…
+      </div>
+    ),
+  }
+) as ComponentType<{
+  center: LatLngExpression;
+  zoom: number;
+  points: Point[];
+}>;
 
 export default function HomePage() {
   const [fid, setFid] = useState<number | null>(null);
@@ -38,7 +44,7 @@ export default function HomePage() {
         const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
         if (viewerFid) setFid(viewerFid);
       } catch {
-        // opened in normal browser
+        // If opened in a normal browser, fid will remain null
       }
     })();
   }, []);
@@ -64,7 +70,7 @@ export default function HomePage() {
 
   const center = useMemo<LatLngExpression>(() => {
     if (points.length) return [points[0].lat, points[0].lng];
-    return [39.5, -98.35];
+    return [39.5, -98.35]; // US-ish default
   }, [points]);
 
   return (
@@ -89,7 +95,11 @@ export default function HomePage() {
           Followers + Following by city
         </div>
         <div style={{ marginTop: 8, fontSize: 12 }}>
-          {fid ? <>Viewer FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
+          {fid ? (
+            <>Viewer FID: {fid}</>
+          ) : (
+            <>Open inside Warpcast to load your network.</>
+          )}
         </div>
         <div style={{ marginTop: 6, fontSize: 12 }}>
           {loading ? "Loading…" : `Pins: ${points.length}`}
