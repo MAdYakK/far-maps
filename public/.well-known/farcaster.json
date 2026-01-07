@@ -1,9 +1,4 @@
 {
-  "name": "Far Maps",
-  "description": "Map your Farcaster followers + following by city",
-  "iconUrl": "/icon.png",
-  "homeUrl": "/",
-  "version": "1.0.0",
   "accountAssociation": {
     "header": "eyJmaWQiOjE0MzY5LCJ0eXBlIjoiYXV0aCIsImtleSI6IjB4ZmEzQ2UyNzRGMDViQjAxQjhkQzg1YTlERkY5NkNhRThjNWM4NjllNiJ9",
     "payload": "eyJkb21haW4iOiJmYXItbWFwcy52ZXJjZWwuYXBwIn0",
