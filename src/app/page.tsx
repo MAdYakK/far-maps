@@ -38,16 +38,24 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
+  (async () => {
+    try {
+      const ctx = await sdk.context;
+      const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
+      if (viewerFid) setFid(viewerFid);
+    } catch {
+      // normal browser: no fid
+    } finally {
+      // ✅ Tell Warpcast the mini app is ready (prevents splash screen persisting)
       try {
-        const ctx = await sdk.context;
-        const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
-        if (viewerFid) setFid(viewerFid);
+        await sdk.actions.ready();
       } catch {
-        // If opened in a normal browser, fid will remain null
+        // ignore if not running inside Farcaster
       }
-    })();
-  }, []);
+    }
+  })();
+}, []);
+
 
   useEffect(() => {
     if (!fid) return;
