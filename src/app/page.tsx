@@ -1,65 +1,140 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useMemo, useState } from "react";
+import type { LatLngExpression } from "leaflet";
+import { sdk } from "@farcaster/miniapp-sdk";
+import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { fixLeafletIcons } from "@/lib/leafletFix";
+
+type Point = {
+  fid: number;
+  username: string;
+  display_name?: string;
+  pfp_url?: string;
+  city: string;
+  lat: number;
+  lng: number;
+};
+
+export default function HomePage() {
+  const [fid, setFid] = useState<number | null>(null);
+  const [points, setPoints] = useState<Point[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fixLeafletIcons();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const ctx = await sdk.context;
+        // SDK typing lag — cast safely
+        const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
+
+        if (viewerFid) setFid(viewerFid);
+      } catch {
+        // If opened in a normal browser, fid will remain null
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!fid) return;
+
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/network?fid=${fid}`);
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error || "Failed to load network");
+        setPoints(json.points || []);
+      } catch (e: any) {
+        setError(e?.message || "Unknown error");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [fid]);
+
+  const center = useMemo<LatLngExpression>(() => {
+    if (points.length) return [points[0].lat, points[0].lng];
+    return [39.5, -98.35]; // US-ish default
+  }, [points]);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main style={{ height: "100vh", width: "100vw" }}>
+      <div
+        style={{
+          position: "absolute",
+          zIndex: 1000,
+          top: 12,
+          left: 12,
+          padding: 10,
+          borderRadius: 12,
+          background: "rgba(0,0,0,0.55)",
+          color: "white",
+          maxWidth: 320,
+        }}
+      >
+        <div style={{ fontWeight: 700 }}>
+          {process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.9 }}>
+          Followers + Following by city
+        </div>
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          {fid ? (
+            <>Viewer FID: {fid}</>
+          ) : (
+            <>Open inside Warpcast to load your network.</>
+          )}
+        </div>
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          {loading ? "Loading…" : `Pins: ${points.length}`}
+        </div>
+        {error && (
+          <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>
+            {error}
+          </div>
+        )}
+      </div>
+
+      <MapContainer
+        center={center}
+        zoom={points.length ? 3 : 4}
+        style={{ height: "100%", width: "100%" }}
+      >
+        <TileLayer
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution="© OpenStreetMap"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+
+        {points.map((p) => (
+          <Marker key={p.fid} position={[p.lat, p.lng]}>
+            <Popup>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {p.pfp_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={p.pfp_url}
+                    alt=""
+                    width={28}
+                    height={28}
+                    style={{ borderRadius: 999 }}
+                  />
+                ) : null}
+                <div>
+                  <div style={{ fontWeight: 700 }}>@{p.username}</div>
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>{p.city}</div>
+                </div>
+              </div>
+            </Popup>
+          </Marker>
+        ))}
+      </MapContainer>
+    </main>
   );
 }
