@@ -37,25 +37,39 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-  (async () => {
-    try {
-      const ctx = await sdk.context;
-      const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
-      if (viewerFid) setFid(viewerFid);
-    } catch {
-      // normal browser: no fid
-    } finally {
-      // ✅ Tell Warpcast the mini app is ready (prevents splash screen persisting)
-      try {
-        await sdk.actions.ready();
-      } catch {
-        // ignore if not running inside Farcaster
-      }
-    }
-  })();
-}, []);
+  // ✅ UI debug for mobile / no-devtools environments
+  const [ctxJson, setCtxJson] = useState<string>("");
+  const [ctxStatus, setCtxStatus] = useState<string>("");
 
+  useEffect(() => {
+    (async () => {
+      try {
+        setCtxStatus("Calling sdk.actions.ready()…");
+        // IMPORTANT: some environments don’t populate context until ready()
+        await sdk.actions.ready();
+
+        setCtxStatus("Fetching sdk.context…");
+        const ctx = await sdk.context;
+
+        // show context in UI so we can debug on mobile
+        setCtxJson(JSON.stringify(ctx, null, 2));
+
+        const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
+        if (viewerFid) {
+          setFid(viewerFid);
+          setCtxStatus(`Got viewer fid: ${viewerFid}`);
+        } else {
+          setCtxStatus("No viewer.fid in context");
+        }
+
+        console.log("MINIAPP_CONTEXT", ctx);
+      } catch (e: any) {
+        console.log("MINIAPP_CONTEXT_ERROR", e);
+        setCtxStatus(`Context error: ${e?.message || String(e)}`);
+        // normal browser / not launched as mini app / sdk not available
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     if (!fid) return;
@@ -93,7 +107,7 @@ export default function HomePage() {
           borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: 320,
+          maxWidth: 360,
         }}
       >
         <div style={{ fontWeight: 700 }}>
@@ -102,26 +116,45 @@ export default function HomePage() {
         <div style={{ fontSize: 12, opacity: 0.9 }}>
           Followers + Following by city
         </div>
+
         <div style={{ marginTop: 8, fontSize: 12 }}>
-          {fid ? (
-            <>Viewer FID: {fid}</>
-            
-          ) : (
-            <>Open inside Warpcast to load your network.</>
-          )}
+          {fid ? <>Viewer FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
         </div>
+
         <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-  {fid ? `Loading from /api/network?fid=${fid}` : "No FID (must open inside Warpcast)"}
-</div>
+          {fid ? `Loading from /api/network?fid=${fid}` : "No FID (must open inside Warpcast)"}
+        </div>
+
+        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+          {ctxStatus || ""}
+        </div>
 
         <div style={{ marginTop: 6, fontSize: 12 }}>
           {loading ? "Loading…" : `Pins: ${points.length}`}
         </div>
+
         {error && (
           <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>
             {error}
           </div>
         )}
+
+        {ctxJson ? (
+          <pre
+            style={{
+              marginTop: 8,
+              fontSize: 10,
+              maxHeight: 160,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              background: "rgba(255,255,255,0.06)",
+              padding: 8,
+              borderRadius: 10,
+            }}
+          >
+            {ctxJson}
+          </pre>
+        ) : null}
       </div>
 
       <div style={{ height: "100%", width: "100%" }}>

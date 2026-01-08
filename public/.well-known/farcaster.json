@@ -1,7 +1,0 @@
-{
-  "accountAssociation": {
-    "header": "eyJmaWQiOjE0MzY5LCJ0eXBlIjoiYXV0aCIsImtleSI6IjB4ZmEzQ2UyNzRGMDViQjAxQjhkQzg1YTlERkY5NkNhRThjNWM4NjllNiJ9",
-    "payload": "eyJkb21haW4iOiJmYXItbWFwcy52ZXJjZWwuYXBwIn0",
-    "signature": "h7HIu23nKR90hJWTIIpQ8OvqLHgi1ErpswDYNdW2l64rVM3cK98sEK0Wr2vp516IN39OHvLNQMumCkTqasgwRBw="
-  }
-}
