@@ -50,14 +50,14 @@ export default function HomePage() {
 
         setCtxJson(JSON.stringify(ctx, null, 2));
 
-        // ✅ Context provides fid under ctx.user.fid (and sometimes ctx.viewer.fid)
-        const viewerFid =
+        // ✅ Some SDK versions provide fid as ctx.user.fid
+        const detectedFid =
           ((ctx as any)?.viewer?.fid as number | undefined) ??
           ((ctx as any)?.user?.fid as number | undefined);
 
-        if (viewerFid) {
-          setFid(viewerFid);
-          setCtxStatus(`Got fid: ${viewerFid}`);
+        if (detectedFid) {
+          setFid(detectedFid);
+          setCtxStatus(`Got fid: ${detectedFid}`);
         } else {
           setCtxStatus("No fid in context (viewer.fid or user.fid)");
         }
@@ -76,13 +76,37 @@ export default function HomePage() {
     (async () => {
       setLoading(true);
       setError(null);
+
       try {
-        const res = await fetch(`/api/network?fid=${fid}`);
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || "Failed to load network");
-        setPoints(json.points || []);
+        const res = await fetch(`/api/network?fid=${fid}`, { cache: "no-store" });
+
+        // ✅ Avoid "Unexpected end of JSON input"
+        const text = await res.text();
+
+        let json: any = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
+        }
+
+        if (!res.ok) {
+          const msg =
+            json?.error ||
+            `API error ${res.status} ${res.statusText}${
+              text ? ` — ${text.slice(0, 200)}` : ""
+            }`;
+          throw new Error(msg);
+        }
+
+        if (!json) {
+          throw new Error("API returned empty or non-JSON response");
+        }
+
+        setPoints(Array.isArray(json.points) ? json.points : []);
       } catch (e: any) {
         setError(e?.message || "Unknown error");
+        setPoints([]);
       } finally {
         setLoading(false);
       }
@@ -106,7 +130,7 @@ export default function HomePage() {
           borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: 360,
+          maxWidth: 380,
         }}
       >
         <div style={{ fontWeight: 700 }}>
@@ -143,7 +167,7 @@ export default function HomePage() {
             style={{
               marginTop: 8,
               fontSize: 10,
-              maxHeight: 160,
+              maxHeight: 170,
               overflow: "auto",
               whiteSpace: "pre-wrap",
               background: "rgba(255,255,255,0.06)",
