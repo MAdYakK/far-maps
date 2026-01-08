@@ -7,7 +7,6 @@ import type { LatLngExpression } from "leaflet";
 import { sdk } from "@farcaster/miniapp-sdk";
 import type { Point } from "@/components/LeafletMap";
 
-// ✅ Leaflet loads ONLY in the browser (prevents Vercel "window is not defined")
 const LeafletMap = dynamic(
   () => import("@/components/LeafletMap").then((m) => m.default),
   {
@@ -37,7 +36,6 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ UI debug for mobile / no-devtools environments
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
@@ -45,28 +43,29 @@ export default function HomePage() {
     (async () => {
       try {
         setCtxStatus("Calling sdk.actions.ready()…");
-        // IMPORTANT: some environments don’t populate context until ready()
         await sdk.actions.ready();
 
         setCtxStatus("Fetching sdk.context…");
         const ctx = await sdk.context;
 
-        // show context in UI so we can debug on mobile
         setCtxJson(JSON.stringify(ctx, null, 2));
 
-        const viewerFid = (ctx as any)?.viewer?.fid as number | undefined;
+        // ✅ Context provides fid under ctx.user.fid (and sometimes ctx.viewer.fid)
+        const viewerFid =
+          ((ctx as any)?.viewer?.fid as number | undefined) ??
+          ((ctx as any)?.user?.fid as number | undefined);
+
         if (viewerFid) {
           setFid(viewerFid);
-          setCtxStatus(`Got viewer fid: ${viewerFid}`);
+          setCtxStatus(`Got fid: ${viewerFid}`);
         } else {
-          setCtxStatus("No viewer.fid in context");
+          setCtxStatus("No fid in context (viewer.fid or user.fid)");
         }
 
         console.log("MINIAPP_CONTEXT", ctx);
       } catch (e: any) {
         console.log("MINIAPP_CONTEXT_ERROR", e);
         setCtxStatus(`Context error: ${e?.message || String(e)}`);
-        // normal browser / not launched as mini app / sdk not available
       }
     })();
   }, []);
@@ -92,7 +91,7 @@ export default function HomePage() {
 
   const center = useMemo<LatLngExpression>(() => {
     if (points.length) return [points[0].lat, points[0].lng];
-    return [39.5, -98.35]; // US-ish default
+    return [39.5, -98.35];
   }, [points]);
 
   return (
@@ -118,7 +117,7 @@ export default function HomePage() {
         </div>
 
         <div style={{ marginTop: 8, fontSize: 12 }}>
-          {fid ? <>Viewer FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
+          {fid ? <>FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
         </div>
 
         <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
