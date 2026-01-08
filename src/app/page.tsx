@@ -105,10 +105,15 @@ export default function HomePage() {
         <div style={{ marginTop: 8, fontSize: 12 }}>
           {fid ? (
             <>Viewer FID: {fid}</>
+            
           ) : (
             <>Open inside Warpcast to load your network.</>
           )}
         </div>
+        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+  {fid ? `Loading from /api/network?fid=${fid}` : "No FID (must open inside Warpcast)"}
+</div>
+
         <div style={{ marginTop: 6, fontSize: 12 }}>
           {loading ? "Loading…" : `Pins: ${points.length}`}
         </div>
