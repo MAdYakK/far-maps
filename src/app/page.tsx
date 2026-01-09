@@ -7,6 +7,27 @@ import type { LatLngExpression } from "leaflet";
 import { sdk } from "@farcaster/miniapp-sdk";
 import type { PinPoint } from "@/components/LeafletMap";
 
+// 🔧 Toggle debug UI here
+const DEBUG = false;
+
+type Mode = "followers" | "following" | "both";
+
+type NetworkResponse = {
+  fid: number;
+  mode: Mode;
+  minScore: number;
+  limitEach: number;
+  followersCount: number;
+  followingCount: number;
+  hydrated: number;
+  scoredOk: number;
+  missingScore: number;
+  withLocation: number;
+  count: number; // number of grouped pins
+  points: PinPoint[];
+};
+
+// ✅ Leaflet loads ONLY in browser (prevents SSR issues)
 const LeafletMap = dynamic(
   () => import("@/components/LeafletMap").then((m) => m.default),
   {
@@ -30,23 +51,6 @@ const LeafletMap = dynamic(
   points: PinPoint[];
 }>;
 
-type Mode = "followers" | "following" | "both";
-
-type NetworkResponse = {
-  fid: number;
-  mode: Mode;
-  minScore: number;
-  limitEach: number;
-  followersCount: number;
-  followingCount: number;
-  hydrated: number;
-  scoredOk: number;
-  missingScore: number;
-  withLocation: number;
-  count: number; // number of grouped pins
-  points: PinPoint[];
-};
-
 export default function HomePage() {
   const [fid, setFid] = useState<number | null>(null);
 
@@ -54,54 +58,62 @@ export default function HomePage() {
   const [points, setPoints] = useState<PinPoint[]>([]);
   const [stats, setStats] = useState<NetworkResponse | null>(null);
 
+  const [mode, setMode] = useState<Mode>("both");
+
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<Mode>("both");
-
+  // Debug-only state
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
-  // --- Miniapp context + ready ---
+  // ─────────────────────────────────────────────
+  // Get Farcaster context + FID
+  // ─────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
-        setCtxStatus("Calling sdk.actions.ready()…");
+        if (DEBUG) setCtxStatus("Calling sdk.actions.ready()…");
         await sdk.actions.ready();
 
-        setCtxStatus("Fetching sdk.context…");
+        if (DEBUG) setCtxStatus("Fetching sdk.context…");
         const ctx = await sdk.context;
 
-        setCtxJson(JSON.stringify(ctx, null, 2));
+        if (DEBUG) setCtxJson(JSON.stringify(ctx, null, 2));
 
-        // Some SDK versions provide fid as ctx.user.fid
         const detectedFid =
           ((ctx as any)?.viewer?.fid as number | undefined) ??
           ((ctx as any)?.user?.fid as number | undefined);
 
         if (detectedFid) {
           setFid(detectedFid);
-          setCtxStatus(`Got fid: ${detectedFid}`);
+          if (DEBUG) setCtxStatus(`Got fid: ${detectedFid}`);
         } else {
-          setCtxStatus("No fid in context (viewer.fid or user.fid)");
+          if (DEBUG) setCtxStatus("No fid in context");
         }
 
-        console.log("MINIAPP_CONTEXT", ctx);
+        if (DEBUG) console.log("MINIAPP_CONTEXT", ctx);
       } catch (e: any) {
-        console.log("MINIAPP_CONTEXT_ERROR", e);
-        setCtxStatus(`Context error: ${e?.message || String(e)}`);
+        if (DEBUG) {
+          console.log("MINIAPP_CONTEXT_ERROR", e);
+          setCtxStatus(`Context error: ${e?.message || String(e)}`);
+        }
       }
     })();
   }, []);
 
-  // --- Fetch data whenever fid or mode changes ---
+  // ─────────────────────────────────────────────
+  // Fetch network data (mode toggle)
+  // ─────────────────────────────────────────────
   useEffect(() => {
     if (!fid) return;
 
     (async () => {
       setLoading(true);
       setError(null);
+      setStats(null);
+
       setLoadingStage(
         mode === "followers"
           ? "Fetching followers…"
@@ -109,18 +121,18 @@ export default function HomePage() {
           ? "Fetching following…"
           : "Fetching followers + following…"
       );
-      setStats(null);
 
       try {
-        const limitEach = 200; // tune as you like
+        const limitEach = 200; // tune
         const minScore = 0.8;
 
         const url = `/api/network?fid=${fid}&mode=${mode}&limitEach=${limitEach}&minScore=${minScore}`;
 
         const res = await fetch(url, { cache: "no-store" });
 
-        // Avoid "Unexpected end of JSON input"
+        // ✅ Avoid "Unexpected end of JSON input"
         const text = await res.text();
+
         let json: any = null;
         try {
           json = text ? JSON.parse(text) : null;
@@ -140,11 +152,15 @@ export default function HomePage() {
         if (!json) throw new Error("API returned empty or non-JSON response");
 
         setLoadingStage("Rendering map…");
+
         setPoints(Array.isArray(json.points) ? json.points : []);
         setStats(json as NetworkResponse);
       } catch (e: any) {
-        // When browser fetch fails entirely, e.message is often "Failed to fetch"
-        setError(`${e?.message || "Unknown error"}${e?.cause?.message ? ` — ${e.cause.message}` : ""}`);
+        setError(
+          `${e?.message || "Unknown error"}${
+            e?.cause?.message ? ` — ${e.cause.message}` : ""
+          }`
+        );
         setPoints([]);
         setStats(null);
       } finally {
@@ -164,7 +180,7 @@ export default function HomePage() {
 
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
-      {/* HUD */}
+      {/* ───────── UI Overlay ───────── */}
       <div
         style={{
           position: "absolute",
@@ -181,10 +197,12 @@ export default function HomePage() {
         <div style={{ fontWeight: 700 }}>
           {process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}
         </div>
+
         <div style={{ fontSize: 12, opacity: 0.9 }}>
-          Map your Farcaster network by location
+          Followers + Following by location
         </div>
 
+        {/* Toggle */}
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
             Following
@@ -202,13 +220,7 @@ export default function HomePage() {
         </div>
 
         <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-          {fid
-            ? `Mode: ${mode} • Pins: ${pinCount} • Users: ${userCount}`
-            : "No FID (must open inside Warpcast)"}
-        </div>
-
-        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-          {ctxStatus || ""}
+          {fid ? `Mode: ${mode} • Pins: ${pinCount} • Users: ${userCount}` : "No FID"}
         </div>
 
         {stats ? (
@@ -219,11 +231,9 @@ export default function HomePage() {
           </div>
         ) : null}
 
-        {loading ? (
-          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-            Loading…
-          </div>
-        ) : null}
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          {loading ? "Loading…" : `Pins: ${pinCount}`}
+        </div>
 
         {error && (
           <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>
@@ -231,22 +241,31 @@ export default function HomePage() {
           </div>
         )}
 
-        {ctxJson ? (
-          <pre
-            style={{
-              marginTop: 8,
-              fontSize: 10,
-              maxHeight: 170,
-              overflow: "auto",
-              whiteSpace: "pre-wrap",
-              background: "rgba(255,255,255,0.06)",
-              padding: 8,
-              borderRadius: 10,
-            }}
-          >
-            {ctxJson}
-          </pre>
-        ) : null}
+        {/* ───────── DEBUG ONLY ───────── */}
+        {DEBUG && (
+          <>
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+              {ctxStatus}
+            </div>
+
+            {ctxJson && (
+              <pre
+                style={{
+                  marginTop: 8,
+                  fontSize: 10,
+                  maxHeight: 170,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  background: "rgba(255,255,255,0.06)",
+                  padding: 8,
+                  borderRadius: 10,
+                }}
+              >
+                {ctxJson}
+              </pre>
+            )}
+          </>
+        )}
       </div>
 
       {/* Loading overlay */}
