@@ -1,28 +1,31 @@
 import { NextResponse } from "next/server";
-import { neynarGet } from "@/lib/neynar";
-import { geocodeCity } from "@/lib/geocode";
+import { getNetworkFidsFromHub } from "@/lib/hub";
 
-type NeynarUser = {
-  fid: number;
-  username: string;
-  display_name?: string;
-  pfp_url?: string;
-  profile?: {
-    bio?: { text?: string };
-    // some APIs expose location as a field; we’ll probe common shapes safely
-    location?: { name?: string };
-  };
-  // sometimes location comes as a simple string or nested in different places
-  location?: string;
+type NeynarBulkResp = {
+  users: Array<{
+    fid: number;
+    username: string;
+    display_name?: string;
+    pfp_url?: string;
 
-  // NEW: some contexts/APIs may provide location as an object
-  // (we keep it loose so we don't break if present)
-  locationObj?: { description?: string } | any;
-};
+    // ✅ Neynar score fields
+    score?: number;
+    experimental?: {
+      neynar_user_score?: number; // deprecated but sometimes present
+    };
 
-type NeynarPage = {
-  users: NeynarUser[];
-  next?: { cursor?: string };
+    profile?: {
+      location?: {
+        latitude?: number;
+        longitude?: number;
+        address?: {
+          city?: string;
+          state?: string;
+          country?: string;
+        };
+      };
+    };
+  }>;
 };
 
 type Point = {
@@ -33,138 +36,153 @@ type Point = {
   city: string;
   lat: number;
   lng: number;
+  score: number;
 };
 
-function extractCity(u: NeynarUser): string | null {
-  // 1) Common Neynar nested shape
-  const fromNested = u.profile?.location?.name?.trim();
-  if (fromNested) return fromNested;
-
-  // 2) Sometimes location is a string
-  const fromTop = typeof u.location === "string" ? u.location.trim() : "";
-  if (fromTop) return fromTop;
-
-  // 3) If something like { location: { description: "City, ST, Country" } } exists
-  const fromObj =
-    typeof (u as any)?.location === "object"
-      ? String((u as any)?.location?.description || (u as any)?.location?.name || "")
-      : "";
-  if (fromObj.trim()) return fromObj.trim();
-
-  // (Optional future) parse bio text or verified fields here.
-  return null;
+function mustEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
 }
 
-// OPTIONAL: basic pagination helper (caps pages to avoid runaway)
-async function fetchAllUsers(
-  endpoint: "followers" | "following",
-  fid: number,
-  limit = 100,
-  maxPages = 3
-): Promise<NeynarUser[]> {
-  const out: NeynarUser[] = [];
-  let cursor: string | undefined = undefined;
+function chunk<T>(arr: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
-  for (let page = 0; page < maxPages; page++) {
-    const qs = new URLSearchParams();
-    qs.set("fid", String(fid));
-    qs.set("limit", String(limit));
-    if (cursor) qs.set("cursor", cursor);
+function formatCity(u: NeynarBulkResp["users"][number]) {
+  const a = u.profile?.location?.address;
+  const parts = [a?.city, a?.state, a?.country].filter(Boolean);
+  return parts.length ? parts.join(", ") : "Unknown";
+}
 
-    const data = await neynarGet<NeynarPage>(`/user/${endpoint}?${qs.toString()}`);
+function getUserScore(u: NeynarBulkResp["users"][number]): number | null {
+  const s =
+    typeof u.score === "number"
+      ? u.score
+      : typeof u.experimental?.neynar_user_score === "number"
+      ? u.experimental.neynar_user_score
+      : null;
 
-    if (Array.isArray(data?.users)) out.push(...data.users);
+  return typeof s === "number" && Number.isFinite(s) ? s : null;
+}
 
-    cursor = data?.next?.cursor;
-    if (!cursor) break;
+async function neynarUserBulk(fids: number[]): Promise<NeynarBulkResp> {
+  const apiKey = mustEnv("NEYNAR_API_KEY");
+
+  const url = `https://api.neynar.com/v2/farcaster/user/bulk?fids=${encodeURIComponent(
+    fids.join(",")
+  )}`;
+
+  const res = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      api_key: apiKey,
+    } as any,
+    cache: "no-store",
+  });
+
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
   }
 
-  return out;
+  if (!res.ok) {
+    const msg = json?.message || json?.error || `Neynar error ${res.status}`;
+    throw new Error(`${msg}${text ? ` — ${text.slice(0, 200)}` : ""}`);
+  }
+  if (!json) throw new Error("Neynar returned empty or non-JSON response");
+  return json as NeynarBulkResp;
 }
 
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const fid = searchParams.get("fid");
+    const fidStr = searchParams.get("fid");
+    const fid = fidStr ? Number(fidStr) : NaN;
 
-    if (!fid) return NextResponse.json({ error: "Missing fid" }, { status: 400 });
-
-    const fidNum = Number(fid);
-    if (!Number.isFinite(fidNum) || fidNum <= 0) {
-      return NextResponse.json({ error: "Invalid fid" }, { status: 400 });
+    if (!fidStr || !Number.isFinite(fid) || fid <= 0) {
+      return NextResponse.json({ error: "Missing or invalid fid" }, { status: 400 });
     }
 
-    // Toggle pagination on/off via query param: ?pages=1 (default 1) or ?pages=3
-    const pagesParam = Number(searchParams.get("pages") || "1");
-    const maxPages = Number.isFinite(pagesParam) ? Math.min(Math.max(pagesParam, 1), 5) : 1;
+    // caps (safe defaults)
+    const limitEachParam = Number(searchParams.get("limitEach") || "500");
+    const limitEach = Number.isFinite(limitEachParam) ? limitEachParam : 500;
 
-    // Followers + Following (paged)
-    const [followersUsers, followingUsers] = await Promise.all([
-      fetchAllUsers("followers", fidNum, 100, maxPages),
-      fetchAllUsers("following", fidNum, 100, maxPages),
-    ]);
+    // ✅ score threshold
+    const minScoreParam = Number(searchParams.get("minScore") || "0.8");
+    const minScore = Number.isFinite(minScoreParam) ? minScoreParam : 0.8;
 
-    // Merge + dedupe by fid
-    const merged = new Map<number, NeynarUser>();
-    for (const u of [...followersUsers, ...followingUsers]) merged.set(u.fid, u);
+    // 1) Hub: get follower + following FIDs (free)
+    const { followers, following } = await getNetworkFidsFromHub(fid, {
+      includeFollowers: true,
+      includeFollowing: true,
+      limitEach,
+    });
 
-    // Debug counters
-    let withCity = 0;
-    let geocodeSuccess = 0;
-    let geocodeFail = 0;
+    // include self so you always try to pin yourself too
+    const merged = Array.from(new Set([fid, ...followers, ...following]));
 
+    // 2) Neynar: hydrate in batches (username/pfp/location/score)
+    const batches = chunk(merged, 100);
+    const allUsers: NeynarBulkResp["users"] = [];
+
+    for (const b of batches) {
+      const r = await neynarUserBulk(b);
+      allUsers.push(...(r.users || []));
+    }
+
+    // 3) Filter: score > minScore + must have lat/lng
     const points: Point[] = [];
 
-    for (const u of merged.values()) {
-      const city = extractCity(u);
-      if (!city) continue;
-      withCity++;
+    let scoredOk = 0;
+    let missingScore = 0;
+    let withLocation = 0;
 
-      const geo = await geocodeCity(city);
-      if (!geo) {
-        geocodeFail++;
+    for (const u of allUsers) {
+      const score = getUserScore(u);
+      if (score === null) {
+        missingScore++;
         continue;
       }
+      if (score <= minScore) continue;
+      scoredOk++;
 
-      // ✅ Normalize to lng (your old code used geo.lon)
-      const lat = Number((geo as any).lat);
-      const lng = Number((geo as any).lng ?? (geo as any).lon);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        geocodeFail++;
-        continue;
-      }
-
-      geocodeSuccess++;
+      const lat = u.profile?.location?.latitude;
+      const lng = u.profile?.location?.longitude;
+      if (typeof lat !== "number" || typeof lng !== "number") continue;
+      withLocation++;
 
       points.push({
         fid: u.fid,
         username: u.username,
         display_name: u.display_name,
         pfp_url: u.pfp_url,
-        city,
+        city: formatCity(u),
         lat,
         lng,
+        score,
       });
     }
 
     return NextResponse.json({
-      fid: fidNum,
-      pages: maxPages,
-      followers: followersUsers.length,
-      following: followingUsers.length,
-      totalUsers: merged.size,
-      withCity,
-      geocodeSuccess,
-      geocodeFail,
+      fid,
+      minScore,
+      followersCount: followers.length,
+      followingCount: following.length,
+      hydrated: allUsers.length,
+      scoredOk,
+      missingScore,
+      withLocation,
       count: points.length,
       points,
     });
   } catch (e: any) {
     console.error("api/network error:", e);
-    return NextResponse.json(
-      { error: e?.message || "Server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || "Server error" }, { status: 500 });
   }
 }
