@@ -37,7 +37,14 @@ const LeafletMap = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div style={{ height: "100%", width: "100%", display: "grid", placeItems: "center" }}>
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
         Loading map…
       </div>
     ),
@@ -66,6 +73,9 @@ export default function HomePage() {
 
   // Abort in-flight requests (prevents piling up + rate limiting)
   const abortRef = useRef<AbortController | null>(null);
+
+  // Share button state
+  const [sharing, setSharing] = useState(false);
 
   // ─────────────────────────────────────────────
   // Get Farcaster context + FID
@@ -129,7 +139,7 @@ export default function HomePage() {
       try {
         // ✅ SAFE DEFAULTS (avoid hammering Pinata hub)
         const limitEach = 800; // per side
-        const maxEach = 5000;  // safety cap if you ever switch to "all"
+        const maxEach = 5000; // safety cap if you ever switch to "all"
         const minScore = 0.8;
         const concurrency = 4;
 
@@ -147,7 +157,10 @@ export default function HomePage() {
           `&hubPageSize=${encodeURIComponent(String(hubPageSize))}` +
           `&hubDelayMs=${encodeURIComponent(String(hubDelayMs))}`;
 
-        const res = await fetch(url, { cache: "no-store", signal: controller.signal });
+        const res = await fetch(url, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
 
         const text = await res.text();
         let json: any = null;
@@ -160,7 +173,9 @@ export default function HomePage() {
         if (!res.ok) {
           const msg =
             json?.error ||
-            `API error ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`;
+            `API error ${res.status} ${res.statusText}${
+              text ? ` — ${text.slice(0, 200)}` : ""
+            }`;
           throw new Error(msg);
         }
 
@@ -196,6 +211,56 @@ export default function HomePage() {
   const pinCount = points.length;
   const userCount = points.reduce((acc, p) => acc + (p.users?.length || 0), 0);
 
+  // ─────────────────────────────────────────────
+  // Share: open your share page
+  // ─────────────────────────────────────────────
+  async function openSharePage() {
+    if (!fid) {
+      setError("No FID yet — open inside Warpcast.");
+      return;
+    }
+
+    try {
+      setSharing(true);
+      setError(null);
+
+      // Keep these in sync with the fetch tunables above
+      const limitEach = 800;
+      const maxEach = 5000;
+      const minScore = 0.8;
+      const concurrency = 4;
+      const hubPageSize = 50;
+      const hubDelayMs = 150;
+
+      // 👇 Change this to whatever route your share page uses.
+      // If your share page is at /share, this is correct.
+      const sharePath = "/share/map";
+
+      const shareUrl =
+        `${window.location.origin}${sharePath}` +
+        `?fid=${encodeURIComponent(String(fid))}` +
+        `&mode=${encodeURIComponent(mode)}` +
+        `&limitEach=${encodeURIComponent(String(limitEach))}` +
+        `&maxEach=${encodeURIComponent(String(maxEach))}` +
+        `&minScore=${encodeURIComponent(String(minScore))}` +
+        `&concurrency=${encodeURIComponent(String(concurrency))}` +
+        `&hubPageSize=${encodeURIComponent(String(hubPageSize))}` +
+        `&hubDelayMs=${encodeURIComponent(String(hubDelayMs))}`;
+
+      // Prefer Warpcast openUrl if available
+      try {
+        await sdk.actions.openUrl(shareUrl);
+      } catch {
+        // Fallback for normal browser/dev
+        window.open(shareUrl, "_blank", "noopener,noreferrer");
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to open share page");
+    } finally {
+      setSharing(false);
+    }
+  }
+
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
       {/* UI Overlay */}
@@ -209,22 +274,37 @@ export default function HomePage() {
           borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: 420,
+          maxWidth: 460,
         }}
       >
-        <div style={{ fontWeight: 700 }}>{process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}</div>
+        <div style={{ fontWeight: 700 }}>
+          {process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}
+        </div>
 
-        <div style={{ fontSize: 12, opacity: 0.9 }}>Followers + Following by location</div>
+        <div style={{ fontSize: 12, opacity: 0.9 }}>
+          Followers + Following by location
+        </div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
+          <ToggleButton
+            active={mode === "following"}
+            onClick={() => setMode("following")}
+          >
             Following
           </ToggleButton>
-          <ToggleButton active={mode === "followers"} onClick={() => setMode("followers")}>
+          <ToggleButton
+            active={mode === "followers"}
+            onClick={() => setMode("followers")}
+          >
             Followers
           </ToggleButton>
           <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
             Both
+          </ToggleButton>
+
+          {/* ✅ Share button added here */}
+          <ToggleButton active={false} onClick={() => openSharePage()}>
+            {sharing ? "Opening…" : "Share"}
           </ToggleButton>
         </div>
 
@@ -238,18 +318,27 @@ export default function HomePage() {
 
         {stats ? (
           <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-            Hub: followers {stats.followersCount} • following {stats.followingCount} • hydrated{" "}
-            {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} • loc {stats.withLocation}
+            Hub: followers {stats.followersCount} • following {stats.followingCount} •
+            hydrated {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} •
+            loc {stats.withLocation}
           </div>
         ) : null}
 
-        <div style={{ marginTop: 6, fontSize: 12 }}>{loading ? "Loading…" : `Pins: ${pinCount}`}</div>
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          {loading ? "Loading…" : `Pins: ${pinCount}`}
+        </div>
 
-        {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
+        {error && (
+          <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>
+            {error}
+          </div>
+        )}
 
         {DEBUG && (
           <>
-            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>{ctxStatus}</div>
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+              {ctxStatus}
+            </div>
             {ctxJson && (
               <pre
                 style={{
@@ -307,7 +396,9 @@ export default function HomePage() {
               <div style={{ fontWeight: 700 }}>Loading Far Maps</div>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{loadingStage || "Loading…"}</div>
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+              {loadingStage || "Loading…"}
+            </div>
           </div>
 
           <style jsx global>{`
