@@ -3,6 +3,7 @@
 import "leaflet/dist/leaflet.css";
 import { useEffect, useMemo, useState } from "react";
 import type { LatLngExpression } from "leaflet";
+import L from "leaflet";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import { fixLeafletIcons } from "@/lib/leafletFix";
 
@@ -22,6 +23,96 @@ export type PinPoint = {
   users: PinUser[];
 };
 
+function escapeHtml(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function makeCountIcon(count: number) {
+  const size = count >= 100 ? 44 : count >= 10 ? 40 : 36;
+  const fontSize = count >= 100 ? 14 : 15;
+
+  const html = `
+    <div style="
+      width:${size}px;
+      height:${size}px;
+      border-radius:9999px;
+      display:grid;
+      place-items:center;
+      background: rgba(255,255,255,0.15);
+      border: 2px solid rgba(255,255,255,0.65);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+      backdrop-filter: blur(6px);
+      color: white;
+      font-weight: 800;
+      font-size:${fontSize}px;
+      line-height:1;
+      text-shadow: 0 2px 6px rgba(0,0,0,0.45);
+      user-select:none;
+    ">
+      ${count}
+    </div>
+  `;
+
+  return L.divIcon({
+    className: "", // prevent Leaflet default icon classes
+    html,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -size / 2],
+  });
+}
+
+function makePfpIcon(pfpUrl: string) {
+  const size = 40;
+  const safeUrl = escapeHtml(pfpUrl);
+
+  const html = `
+    <div style="
+      width:${size}px;
+      height:${size}px;
+      border-radius:9999px;
+      overflow:hidden;
+      border: 2px solid rgba(255,255,255,0.75);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+      background: rgba(255,255,255,0.12);
+    ">
+      <img
+        src="${safeUrl}"
+        style="
+          width:100%;
+          height:100%;
+          object-fit:cover;
+          display:block;
+        "
+        referrerpolicy="no-referrer"
+        onerror="this.style.display='none';"
+      />
+    </div>
+  `;
+
+  return L.divIcon({
+    className: "",
+    html,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -size / 2],
+  });
+}
+
+function pickPinIcon(p: PinPoint) {
+  if (p.count > 1) return makeCountIcon(p.count);
+
+  const u = p.users?.[0];
+  if (u?.pfp_url) return makePfpIcon(u.pfp_url);
+
+  return makeCountIcon(1);
+}
+
 export default function LeafletMap({
   center,
   zoom,
@@ -35,6 +126,15 @@ export default function LeafletMap({
     fixLeafletIcons();
   }, []);
 
+  // Optional: cache icons a bit so we don't recreate as much on rerenders
+  const markerData = useMemo(() => {
+    return points.map((p) => ({
+      key: `${p.lat},${p.lng}`,
+      p,
+      icon: pickPinIcon(p),
+    }));
+  }, [points]);
+
   return (
     <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }}>
       <TileLayer
@@ -42,13 +142,11 @@ export default function LeafletMap({
         attribution="© OpenStreetMap"
       />
 
-      {points.map((p) => (
-        <Marker key={`${p.lat},${p.lng}`} position={[p.lat, p.lng]}>
+      {markerData.map(({ key, p, icon }) => (
+        <Marker key={key} position={[p.lat, p.lng]} icon={icon}>
           <Popup>
             <div style={{ minWidth: 220, maxWidth: 280 }}>
-              <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                {p.city}
-              </div>
+              <div style={{ fontWeight: 800, marginBottom: 4 }}>{p.city}</div>
               <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
                 {p.count} {p.count === 1 ? "person" : "people"} here
               </div>
@@ -89,6 +187,10 @@ function UserList({ users }: { users: PinUser[] }) {
                 width={26}
                 height={26}
                 style={{ borderRadius: 999, flex: "0 0 auto" }}
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                }}
               />
             ) : (
               <div
