@@ -3,12 +3,7 @@
 import "leaflet/dist/leaflet.css";
 import { useEffect } from "react";
 import L from "leaflet";
-import {
-  MapContainer,
-  TileLayer,
-  CircleMarker,
-  useMap,
-} from "react-leaflet";
+import { MapContainer, TileLayer, CircleMarker, useMap } from "react-leaflet";
 import { fixLeafletIcons } from "@/lib/leafletFix";
 
 export type SharePinPoint = {
@@ -30,11 +25,8 @@ function FitBounds({ points, ready }: { points: SharePinPoint[]; ready: boolean 
       return;
     }
 
-    const bounds = L.latLngBounds(
-      points.map((p) => [p.lat, p.lng] as [number, number])
-    );
-
-    map.fitBounds(bounds, { padding: [30, 30] });
+    const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng] as [number, number]));
+    map.fitBounds(bounds, { padding: [18, 18] });
   }, [points, ready, map]);
 
   return null;
@@ -58,6 +50,12 @@ export default function ShareMapInner({
       style={{ height: "100%", width: "100%" }}
       zoomControl={false}
       attributionControl={false}
+      dragging={false}
+      scrollWheelZoom={false}
+      doubleClickZoom={false}
+      touchZoom={false}
+      boxZoom={false}
+      keyboard={false}
     >
       <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
@@ -67,7 +65,9 @@ export default function ShareMapInner({
         <CircleMarker
           key={`${p.lat},${p.lng}`}
           center={[p.lat, p.lng]}
-          radius={p.count > 1 ? 6 : 4}
+          radius={p.count >= 5 ? 4 : p.count > 1 ? 3 : 2}
+          fillOpacity={0.85}
+          stroke={false}
         />
       ))}
     </MapContainer>
