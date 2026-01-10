@@ -124,7 +124,7 @@ export default function HomePage() {
 
       try {
         const limitEach = 5000; // tune
-        const minScore = 0.7;
+        const minScore = 0.5;
 
         const url = `/api/network?fid=${fid}&mode=${mode}&limitEach=${limitEach}&minScore=${minScore}`;
 
