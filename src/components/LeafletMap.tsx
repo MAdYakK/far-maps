@@ -32,6 +32,33 @@ function escapeHtml(s: string) {
     .replaceAll("'", "&#039;");
 }
 
+/* ──────────────────────────────────────────────────────────────
+   Icon caches (persist per warm instance)
+   ────────────────────────────────────────────────────────────── */
+
+const g = globalThis as any;
+
+if (!g.__FARMAPS_PFP_ICON_CACHE__) g.__FARMAPS_PFP_ICON_CACHE__ = new Map<string, L.DivIcon>();
+if (!g.__FARMAPS_COUNT_ICON_CACHE__) g.__FARMAPS_COUNT_ICON_CACHE__ = new Map<number, L.DivIcon>();
+
+const pfpIconCache: Map<string, L.DivIcon> = g.__FARMAPS_PFP_ICON_CACHE__;
+const countIconCache: Map<number, L.DivIcon> = g.__FARMAPS_COUNT_ICON_CACHE__;
+
+const MAX_PFP_ICONS = 5000;   // cap unique pfps cached
+const MAX_COUNT_ICONS = 300;  // cap unique counts cached
+
+function pruneMap<K, V>(m: Map<K, V>, max: number) {
+  if (m.size <= max) return;
+  // delete oldest inserted keys (Map keeps insertion order)
+  const overflow = m.size - max;
+  let removed = 0;
+  for (const key of m.keys()) {
+    m.delete(key);
+    removed++;
+    if (removed >= overflow) break;
+  }
+}
+
 function makeCountIcon(count: number) {
   const size = count >= 100 ? 44 : count >= 10 ? 40 : 36;
   const fontSize = count >= 100 ? 14 : 15;
@@ -59,12 +86,23 @@ function makeCountIcon(count: number) {
   `;
 
   return L.divIcon({
-    className: "", // prevent Leaflet default icon classes
+    className: "",
     html,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     popupAnchor: [0, -size / 2],
   });
+}
+
+function getCountIconCached(count: number) {
+  const c = Math.max(1, Math.floor(count));
+  const existing = countIconCache.get(c);
+  if (existing) return existing;
+
+  const created = makeCountIcon(c);
+  countIconCache.set(c, created);
+  pruneMap(countIconCache, MAX_COUNT_ICONS);
+  return created;
 }
 
 function makePfpIcon(pfpUrl: string) {
@@ -104,13 +142,25 @@ function makePfpIcon(pfpUrl: string) {
   });
 }
 
+function getPfpIconCached(pfpUrl: string) {
+  // normalize key a tiny bit (avoid caching empty/whitespace variants)
+  const key = pfpUrl.trim();
+  const existing = pfpIconCache.get(key);
+  if (existing) return existing;
+
+  const created = makePfpIcon(key);
+  pfpIconCache.set(key, created);
+  pruneMap(pfpIconCache, MAX_PFP_ICONS);
+  return created;
+}
+
 function pickPinIcon(p: PinPoint) {
-  if (p.count > 1) return makeCountIcon(p.count);
+  if (p.count > 1) return getCountIconCached(p.count);
 
   const u = p.users?.[0];
-  if (u?.pfp_url) return makePfpIcon(u.pfp_url);
+  if (u?.pfp_url) return getPfpIconCached(u.pfp_url);
 
-  return makeCountIcon(1);
+  return getCountIconCached(1);
 }
 
 export default function LeafletMap({
@@ -126,7 +176,6 @@ export default function LeafletMap({
     fixLeafletIcons();
   }, []);
 
-  // Optional: cache icons a bit so we don't recreate as much on rerenders
   const markerData = useMemo(() => {
     return points.map((p) => ({
       key: `${p.lat},${p.lng}`,

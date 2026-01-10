@@ -16,7 +16,8 @@ type NetworkResponse = {
   fid: number;
   mode: Mode;
   minScore: number;
-  limitEach: number;
+  limitEach: string | number;
+  maxEach?: number;
   followersCount: number;
   followingCount: number;
   hydrated: number;
@@ -25,6 +26,10 @@ type NetworkResponse = {
   withLocation: number;
   count: number; // number of grouped pins
   points: PinPoint[];
+  cache?: {
+    network?: { hit?: boolean };
+    users?: { requested?: number; cacheHits?: number; fetchedCount?: number };
+  };
 };
 
 // ✅ Leaflet loads ONLY in browser (prevents SSR issues)
@@ -67,6 +72,9 @@ export default function HomePage() {
   // Debug-only state
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
+
+  // Share state
+  const [sharing, setSharing] = useState(false);
 
   // ─────────────────────────────────────────────
   // Get Farcaster context + FID
@@ -123,10 +131,19 @@ export default function HomePage() {
       );
 
       try {
-        const limitEach = 5000; // tune
+        // 🔥 Tunables
+        const limitEach = "all"; // "all" (bounded by maxEach) OR number
+        const maxEach = 20000; // safety cap per side when limitEach="all"
         const minScore = 0.5;
+        const concurrency = 4;
 
-        const url = `/api/network?fid=${fid}&mode=${mode}&limitEach=${limitEach}&minScore=${minScore}`;
+        const url =
+          `/api/network?fid=${fid}` +
+          `&mode=${mode}` +
+          `&limitEach=${encodeURIComponent(String(limitEach))}` +
+          `&maxEach=${encodeURIComponent(String(maxEach))}` +
+          `&minScore=${encodeURIComponent(String(minScore))}` +
+          `&concurrency=${encodeURIComponent(String(concurrency))}`;
 
         const res = await fetch(url, { cache: "no-store" });
 
@@ -178,6 +195,40 @@ export default function HomePage() {
   const pinCount = points.length;
   const userCount = points.reduce((acc, p) => acc + (p.users?.length || 0), 0);
 
+  // ─────────────────────────────────────────────
+  // Share image (server-generated PNG)
+  // ─────────────────────────────────────────────
+  async function shareMapImage() {
+    if (!fid) return;
+
+    try {
+      setSharing(true);
+
+      // Match your fetch tunables above so the image represents the same view.
+      const minScore = stats?.minScore ?? 0.5;
+      const limitEach = stats?.limitEach ?? "all";
+      const maxEach = stats?.maxEach ?? 20000;
+
+      const imageUrl =
+        `${window.location.origin}/api/map-image` +
+        `?fid=${encodeURIComponent(String(fid))}` +
+        `&mode=${encodeURIComponent(mode)}` +
+        `&minScore=${encodeURIComponent(String(minScore))}` +
+        `&limitEach=${encodeURIComponent(String(limitEach))}` +
+        `&maxEach=${encodeURIComponent(String(maxEach))}` +
+        `&w=1200&h=630`;
+
+      await sdk.actions.composeCast({
+        text: "My Farcaster network map",
+        embeds: [imageUrl],
+      });
+    } catch (e: any) {
+      setError(e?.message || "Failed to share image");
+    } finally {
+      setSharing(false);
+    }
+  }
+
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
       {/* ───────── UI Overlay ───────── */}
@@ -213,6 +264,16 @@ export default function HomePage() {
           <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
             Both
           </ToggleButton>
+
+          {/* Share button */}
+          <ToggleButton
+            active={false}
+            onClick={() => {
+              if (!sharing && !loading) shareMapImage();
+            }}
+          >
+            {sharing ? "Sharing…" : "Share image"}
+          </ToggleButton>
         </div>
 
         <div style={{ marginTop: 8, fontSize: 12 }}>
@@ -228,6 +289,13 @@ export default function HomePage() {
             Hub: followers {stats.followersCount} • following {stats.followingCount} •
             hydrated {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} •
             loc {stats.withLocation}
+            {stats.cache?.users ? (
+              <>
+                {" "}
+                • cache hits {stats.cache.users.cacheHits ?? 0} • fetched{" "}
+                {stats.cache.users.fetchedCount ?? 0}
+              </>
+            ) : null}
           </div>
         ) : null}
 
