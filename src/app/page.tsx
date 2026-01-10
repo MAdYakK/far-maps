@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { ComponentType } from "react";
 import type { LatLngExpression } from "leaflet";
@@ -24,7 +24,7 @@ type NetworkResponse = {
   scoredOk: number;
   missingScore: number;
   withLocation: number;
-  count: number; // number of grouped pins
+  count: number;
   points: PinPoint[];
   cache?: {
     network?: { hit?: boolean };
@@ -32,20 +32,12 @@ type NetworkResponse = {
   };
 };
 
-// ✅ Leaflet loads ONLY in browser (prevents SSR issues)
 const LeafletMap = dynamic(
   () => import("@/components/LeafletMap").then((m) => m.default),
   {
     ssr: false,
     loading: () => (
-      <div
-        style={{
-          height: "100%",
-          width: "100%",
-          display: "grid",
-          placeItems: "center",
-        }}
-      >
+      <div style={{ height: "100%", width: "100%", display: "grid", placeItems: "center" }}>
         Loading map…
       </div>
     ),
@@ -59,7 +51,6 @@ const LeafletMap = dynamic(
 export default function HomePage() {
   const [fid, setFid] = useState<number | null>(null);
 
-  // grouped pins now
   const [points, setPoints] = useState<PinPoint[]>([]);
   const [stats, setStats] = useState<NetworkResponse | null>(null);
 
@@ -73,8 +64,8 @@ export default function HomePage() {
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
-  // Share state
-  const [sharing, setSharing] = useState(false);
+  // Abort in-flight requests (prevents piling up + rate limiting)
+  const abortRef = useRef<AbortController | null>(null);
 
   // ─────────────────────────────────────────────
   // Get Farcaster context + FID
@@ -117,6 +108,11 @@ export default function HomePage() {
   useEffect(() => {
     if (!fid) return;
 
+    // cancel any previous request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     (async () => {
       setLoading(true);
       setError(null);
@@ -131,11 +127,15 @@ export default function HomePage() {
       );
 
       try {
-        // 🔥 Tunables
-        const limitEach = "all"; // "all" (bounded by maxEach) OR number
-        const maxEach = 20000; // safety cap per side when limitEach="all"
-        const minScore = 0.5;
+        // ✅ SAFE DEFAULTS (avoid hammering Pinata hub)
+        const limitEach = 800; // per side
+        const maxEach = 5000;  // safety cap if you ever switch to "all"
+        const minScore = 0.8;
         const concurrency = 4;
+
+        // Hub pacing knobs (these help a ton on pinata)
+        const hubPageSize = 50;
+        const hubDelayMs = 150;
 
         const url =
           `/api/network?fid=${fid}` +
@@ -143,13 +143,13 @@ export default function HomePage() {
           `&limitEach=${encodeURIComponent(String(limitEach))}` +
           `&maxEach=${encodeURIComponent(String(maxEach))}` +
           `&minScore=${encodeURIComponent(String(minScore))}` +
-          `&concurrency=${encodeURIComponent(String(concurrency))}`;
+          `&concurrency=${encodeURIComponent(String(concurrency))}` +
+          `&hubPageSize=${encodeURIComponent(String(hubPageSize))}` +
+          `&hubDelayMs=${encodeURIComponent(String(hubDelayMs))}`;
 
-        const res = await fetch(url, { cache: "no-store" });
+        const res = await fetch(url, { cache: "no-store", signal: controller.signal });
 
-        // ✅ Avoid "Unexpected end of JSON input"
         const text = await res.text();
-
         let json: any = null;
         try {
           json = text ? JSON.parse(text) : null;
@@ -160,9 +160,7 @@ export default function HomePage() {
         if (!res.ok) {
           const msg =
             json?.error ||
-            `API error ${res.status} ${res.statusText}${
-              text ? ` — ${text.slice(0, 200)}` : ""
-            }`;
+            `API error ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`;
           throw new Error(msg);
         }
 
@@ -173,11 +171,10 @@ export default function HomePage() {
         setPoints(Array.isArray(json.points) ? json.points : []);
         setStats(json as NetworkResponse);
       } catch (e: any) {
-        setError(
-          `${e?.message || "Unknown error"}${
-            e?.cause?.message ? ` — ${e.cause.message}` : ""
-          }`
-        );
+        // Ignore abort errors (toggle spamming)
+        if (e?.name === "AbortError") return;
+
+        setError(e?.message || "Unknown error");
         setPoints([]);
         setStats(null);
       } finally {
@@ -185,6 +182,10 @@ export default function HomePage() {
         setLoadingStage("");
       }
     })();
+
+    return () => {
+      controller.abort();
+    };
   }, [fid, mode]);
 
   const center = useMemo<LatLngExpression>(() => {
@@ -195,43 +196,9 @@ export default function HomePage() {
   const pinCount = points.length;
   const userCount = points.reduce((acc, p) => acc + (p.users?.length || 0), 0);
 
-  // ─────────────────────────────────────────────
-  // Share image (server-generated PNG)
-  // ─────────────────────────────────────────────
-  async function shareMapImage() {
-    if (!fid) return;
-
-    try {
-      setSharing(true);
-
-      // Match your fetch tunables above so the image represents the same view.
-      const minScore = stats?.minScore ?? 0.5;
-      const limitEach = stats?.limitEach ?? "all";
-      const maxEach = stats?.maxEach ?? 20000;
-
-      const imageUrl =
-        `${window.location.origin}/api/map-image` +
-        `?fid=${encodeURIComponent(String(fid))}` +
-        `&mode=${encodeURIComponent(mode)}` +
-        `&minScore=${encodeURIComponent(String(minScore))}` +
-        `&limitEach=${encodeURIComponent(String(limitEach))}` +
-        `&maxEach=${encodeURIComponent(String(maxEach))}` +
-        `&w=1200&h=630`;
-
-      await sdk.actions.composeCast({
-        text: "My Farcaster network map",
-        embeds: [imageUrl],
-      });
-    } catch (e: any) {
-      setError(e?.message || "Failed to share image");
-    } finally {
-      setSharing(false);
-    }
-  }
-
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
-      {/* ───────── UI Overlay ───────── */}
+      {/* UI Overlay */}
       <div
         style={{
           position: "absolute",
@@ -245,15 +212,10 @@ export default function HomePage() {
           maxWidth: 420,
         }}
       >
-        <div style={{ fontWeight: 700 }}>
-          {process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}
-        </div>
+        <div style={{ fontWeight: 700 }}>{process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}</div>
 
-        <div style={{ fontSize: 12, opacity: 0.9 }}>
-          Followers + Following by location
-        </div>
+        <div style={{ fontSize: 12, opacity: 0.9 }}>Followers + Following by location</div>
 
-        {/* Toggle */}
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
             Following
@@ -263,16 +225,6 @@ export default function HomePage() {
           </ToggleButton>
           <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
             Both
-          </ToggleButton>
-
-          {/* Share button */}
-          <ToggleButton
-            active={false}
-            onClick={() => {
-              if (!sharing && !loading) shareMapImage();
-            }}
-          >
-            {sharing ? "Sharing…" : "Share image"}
           </ToggleButton>
         </div>
 
@@ -286,36 +238,18 @@ export default function HomePage() {
 
         {stats ? (
           <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-            Hub: followers {stats.followersCount} • following {stats.followingCount} •
-            hydrated {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} •
-            loc {stats.withLocation}
-            {stats.cache?.users ? (
-              <>
-                {" "}
-                • cache hits {stats.cache.users.cacheHits ?? 0} • fetched{" "}
-                {stats.cache.users.fetchedCount ?? 0}
-              </>
-            ) : null}
+            Hub: followers {stats.followersCount} • following {stats.followingCount} • hydrated{" "}
+            {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} • loc {stats.withLocation}
           </div>
         ) : null}
 
-        <div style={{ marginTop: 6, fontSize: 12 }}>
-          {loading ? "Loading…" : `Pins: ${pinCount}`}
-        </div>
+        <div style={{ marginTop: 6, fontSize: 12 }}>{loading ? "Loading…" : `Pins: ${pinCount}`}</div>
 
-        {error && (
-          <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>
-            {error}
-          </div>
-        )}
+        {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
 
-        {/* ───────── DEBUG ONLY ───────── */}
         {DEBUG && (
           <>
-            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-              {ctxStatus}
-            </div>
-
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>{ctxStatus}</div>
             {ctxJson && (
               <pre
                 style={{
@@ -373,43 +307,7 @@ export default function HomePage() {
               <div style={{ fontWeight: 700 }}>Loading Far Maps</div>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-              {loadingStage || "Loading…"}
-            </div>
-
-            <div
-              style={{
-                marginTop: 10,
-                height: 8,
-                background: "rgba(255,255,255,0.15)",
-                borderRadius: 999,
-                overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  height: "100%",
-                  width: stats
-                    ? `${Math.min(
-                        100,
-                        Math.round((stats.withLocation / Math.max(1, stats.hydrated)) * 100)
-                      )}%`
-                    : "35%",
-                  background: "rgba(255,255,255,0.85)",
-                }}
-              />
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-              {stats ? (
-                <>
-                  Hydrated: {stats.hydrated} • Score&gt;{stats.minScore}: {stats.scoredOk} •
-                  Pins: {pinCount} • Users: {userCount}
-                </>
-              ) : (
-                <>Starting…</>
-              )}
-            </div>
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{loadingStage || "Loading…"}</div>
           </div>
 
           <style jsx global>{`
