@@ -1,131 +1,267 @@
 "use client";
 
-export const dynamic = "force-dynamic"; // ✅ prevents static prerender
-export const revalidate = 0;
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { sdk } from "@farcaster/miniapp-sdk";
 
-import dynamicImport from "next/dynamic";
-import { useEffect, useState } from "react";
-import type { ComponentType } from "react";
+type Mode = "followers" | "following" | "both";
 
-type PinUser = {
-  fid: number;
-  username: string;
-  display_name?: string;
-  pfp_url?: string;
-  score: number;
-};
-
-type PinPoint = {
-  lat: number;
-  lng: number;
-  city: string;
-  count: number;
-  users: PinUser[];
-};
-
-const ShareMapInner = dynamicImport(
-  () => import("./share-map-inner").then((m) => m.default),
-  { ssr: false }
-) as ComponentType<{
-  points: PinPoint[];
-  ready: boolean;
-  imageUrl: string;
-  homeUrl: string;
-  renderOnly: boolean;
-}>;
+function getBaseUrl() {
+  // Prefer env on Vercel, fallback to window origin
+  const env = process.env.NEXT_PUBLIC_URL;
+  if (env && env.startsWith("http")) return env.replace(/\/+$/, "");
+  if (typeof window !== "undefined") return window.location.origin;
+  return "";
+}
 
 export default function ShareMapPage() {
-  const [points, setPoints] = useState<PinPoint[]>([]);
-  const [ready, setReady] = useState(false);
+  const router = useRouter();
 
-  // ✅ do NOT use window in useMemo during render
-  const [renderOnly, setRenderOnly] = useState(false);
-  const [imageUrl, setImageUrl] = useState("");
-  const [homeUrl, setHomeUrl] = useState("");
-  const [networkUrl, setNetworkUrl] = useState("");
+  const [fid, setFid] = useState<number | null>(null);
+  const [mode, setMode] = useState<Mode>("both");
 
+  const [minScore, setMinScore] = useState("0.8");
+  const [limitEach, setLimitEach] = useState("800");
+  const [maxEach, setMaxEach] = useState("5000");
+  const [concurrency, setConcurrency] = useState("4");
+  const [hubPageSize, setHubPageSize] = useState("50");
+  const [hubDelayMs, setHubDelayMs] = useState("150");
+
+  const [imgOk, setImgOk] = useState<boolean | null>(null);
+  const [imgErr, setImgErr] = useState<string>("");
+
+  const [sharing, setSharing] = useState(false);
+
+  // Pull params from query string; if missing fid, try sdk.context
   useEffect(() => {
-    // ✅ safe: runs only on client
-    const sp = new URLSearchParams(window.location.search);
-    const fid = sp.get("fid") || "";
-    const mode = sp.get("mode") || "both";
-    const minScore = sp.get("minScore") || "0.8";
-    const limitEach = sp.get("limitEach") || "800";
-    const maxEach = sp.get("maxEach") || "5000";
-    const w = sp.get("w") || "1000";
-    const h = sp.get("h") || "1000";
-    const ro = sp.get("renderOnly") === "1";
-
-    setRenderOnly(ro);
-    setHomeUrl(`${window.location.origin}/`);
-
-    if (!fid) {
-      setReady(true);
-      return;
-    }
-
-    const base = window.location.origin;
-
-    setNetworkUrl(
-      `/api/network?fid=${encodeURIComponent(fid)}` +
-        `&mode=${encodeURIComponent(mode)}` +
-        `&minScore=${encodeURIComponent(minScore)}` +
-        `&limitEach=${encodeURIComponent(limitEach)}` +
-        `&maxEach=${encodeURIComponent(maxEach)}`
-    );
-
-    setImageUrl(
-      `${base}/api/map-image` +
-        `?fid=${encodeURIComponent(fid)}` +
-        `&mode=${encodeURIComponent(mode)}` +
-        `&minScore=${encodeURIComponent(minScore)}` +
-        `&limitEach=${encodeURIComponent(limitEach)}` +
-        `&maxEach=${encodeURIComponent(maxEach)}` +
-        `&w=${encodeURIComponent(w)}` +
-        `&h=${encodeURIComponent(h)}`
-    );
-  }, []);
-
-  useEffect(() => {
-    if (!networkUrl) return;
-
     (async () => {
-      try {
-        const res = await fetch(networkUrl, { cache: "no-store" });
-        const text = await res.text();
-        let json: any = null;
-        try {
-          json = text ? JSON.parse(text) : null;
-        } catch {
-          json = null;
-        }
+      const sp = new URLSearchParams(window.location.search);
 
-        setPoints(Array.isArray(json?.points) ? json.points : []);
-      } finally {
-        setReady(true);
+      const qFid = sp.get("fid");
+      const qMode = (sp.get("mode") as Mode | null) ?? null;
+
+      if (qMode === "followers" || qMode === "following" || qMode === "both") setMode(qMode);
+
+      if (sp.get("minScore")) setMinScore(sp.get("minScore")!);
+      if (sp.get("limitEach")) setLimitEach(sp.get("limitEach")!);
+      if (sp.get("maxEach")) setMaxEach(sp.get("maxEach")!);
+      if (sp.get("concurrency")) setConcurrency(sp.get("concurrency")!);
+      if (sp.get("hubPageSize")) setHubPageSize(sp.get("hubPageSize")!);
+      if (sp.get("hubDelayMs")) setHubDelayMs(sp.get("hubDelayMs")!);
+
+      if (qFid && Number.isFinite(Number(qFid))) {
+        setFid(Number(qFid));
+        return;
+      }
+
+      // fallback: try context
+      try {
+        await sdk.actions.ready();
+        const ctx = await sdk.context;
+        const detectedFid =
+          ((ctx as any)?.viewer?.fid as number | undefined) ??
+          ((ctx as any)?.user?.fid as number | undefined);
+        if (detectedFid) setFid(detectedFid);
+      } catch {
+        // ignore
       }
     })();
-  }, [networkUrl]);
+  }, []);
+
+  // ✅ Relative URL for rendering inside the app (avoids origin weirdness)
+  const imageSrc = useMemo(() => {
+    if (!fid) return "";
+    return (
+      `/api/map-image` +
+      `?fid=${encodeURIComponent(String(fid))}` +
+      `&mode=${encodeURIComponent(mode)}` +
+      `&minScore=${encodeURIComponent(minScore)}` +
+      `&limitEach=${encodeURIComponent(limitEach)}` +
+      `&maxEach=${encodeURIComponent(maxEach)}` +
+      `&concurrency=${encodeURIComponent(concurrency)}` +
+      `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
+      `&hubDelayMs=${encodeURIComponent(hubDelayMs)}` +
+      `&w=1000&h=1000` +
+      `&v=${Date.now()}` // bust cache for testing
+    );
+  }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs]);
+
+  // ✅ Absolute URL for embedding in cast
+  const imageAbsolute = useMemo(() => {
+    if (!fid) return "";
+    const base = getBaseUrl();
+    if (!base) return "";
+    return `${base}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
+  }, [fid, imageSrc]);
+
+  async function shareCast() {
+    if (!fid || !imageAbsolute) return;
+
+    try {
+      setSharing(true);
+      await sdk.actions.composeCast({
+        text: "My Farmap! Check out yours!",
+        embeds: [imageAbsolute],
+      });
+    } catch (e: any) {
+      setImgErr(e?.message || "Failed to share");
+    } finally {
+      setSharing(false);
+    }
+  }
 
   return (
-    <div
-      id="share-map-root"
+    <main
       style={{
-        width: "100vw",
         height: "100vh",
+        width: "100vw",
         margin: 0,
         padding: 0,
         overflow: "hidden",
-        background: "#c7b3ff",
+        background: "#cdb7ff", // light purple
+        display: "flex",
+        flexDirection: "column",
       }}
     >
-      <ShareMapInner
-        points={points}
-        ready={ready}
-        imageUrl={imageUrl}
-        homeUrl={homeUrl}
-        renderOnly={renderOnly}
-      />
-    </div>
+      {/* Top bubble bar */}
+      <div
+        style={{
+          position: "relative",
+          zIndex: 10,
+          padding: 12,
+        }}
+      >
+        <div
+          style={{
+            borderRadius: 14,
+            background: "rgba(0,0,0,0.55)",
+            color: "white",
+            padding: 10,
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
+          <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing}>
+            {sharing ? "Sharing…" : "Share Cast"}
+          </BubbleButton>
+
+          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
+            {fid ? `FID ${fid} • ${mode}` : "Loading…"}
+          </div>
+        </div>
+      </div>
+
+      {/* Image frame */}
+      <div
+        style={{
+          flex: 1,
+          display: "grid",
+          placeItems: "center",
+          padding: 16,
+        }}
+      >
+        <div
+          style={{
+            width: "min(92vw, 560px)",
+            aspectRatio: "1 / 1",
+            borderRadius: 18,
+            background: "rgba(255,255,255,0.35)",
+            boxShadow: "0 14px 50px rgba(0,0,0,0.25)",
+            padding: 12,
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              borderRadius: 14,
+              background: "rgba(0,0,0,0.15)",
+              overflow: "hidden",
+              position: "relative",
+              display: "grid",
+              placeItems: "center",
+            }}
+          >
+            {!fid ? (
+              <div style={{ color: "rgba(0,0,0,0.75)", fontWeight: 700 }}>Loading…</div>
+            ) : (
+              <>
+                {/* If image fails, we show a helpful message */}
+                <img
+                  src={imageSrc}
+                  alt="Farmap"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onLoad={() => {
+                    setImgOk(true);
+                    setImgErr("");
+                  }}
+                  onError={() => {
+                    setImgOk(false);
+                    setImgErr("Map image failed to load (api/map-image returned an error).");
+                  }}
+                />
+
+                {imgOk === false ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "grid",
+                      placeItems: "center",
+                      padding: 14,
+                      textAlign: "center",
+                      background: "rgba(255,255,255,0.85)",
+                      color: "#2b1b55",
+                      fontWeight: 700,
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 14 }}>{imgErr}</div>
+                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, opacity: 0.9 }}>
+                        Try again in a moment (Pinata hub / Neynar can rate-limit).
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function BubbleButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!!disabled}
+      style={{
+        border: "1px solid rgba(255,255,255,0.22)",
+        background: disabled ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.18)",
+        color: "white",
+        padding: "7px 12px",
+        borderRadius: 999,
+        fontSize: 12,
+        cursor: disabled ? "not-allowed" : "pointer",
+        userSelect: "none",
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {children}
+    </button>
   );
 }
