@@ -1,7 +1,10 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic"; // ✅ prevents static prerender
+export const revalidate = 0;
+
+import dynamicImport from "next/dynamic";
+import { useEffect, useState } from "react";
 import type { ComponentType } from "react";
 
 type PinUser = {
@@ -20,7 +23,7 @@ type PinPoint = {
   users: PinUser[];
 };
 
-const ShareMapInner = dynamic(
+const ShareMapInner = dynamicImport(
   () => import("./share-map-inner").then((m) => m.default),
   { ssr: false }
 ) as ComponentType<{
@@ -35,7 +38,14 @@ export default function ShareMapPage() {
   const [points, setPoints] = useState<PinPoint[]>([]);
   const [ready, setReady] = useState(false);
 
-  const params = useMemo(() => {
+  // ✅ do NOT use window in useMemo during render
+  const [renderOnly, setRenderOnly] = useState(false);
+  const [imageUrl, setImageUrl] = useState("");
+  const [homeUrl, setHomeUrl] = useState("");
+  const [networkUrl, setNetworkUrl] = useState("");
+
+  useEffect(() => {
+    // ✅ safe: runs only on client
     const sp = new URLSearchParams(window.location.search);
     const fid = sp.get("fid") || "";
     const mode = sp.get("mode") || "both";
@@ -44,44 +54,45 @@ export default function ShareMapPage() {
     const maxEach = sp.get("maxEach") || "5000";
     const w = sp.get("w") || "1000";
     const h = sp.get("h") || "1000";
-    const renderOnly = sp.get("renderOnly") === "1";
-    return { fid, mode, minScore, limitEach, maxEach, w, h, renderOnly };
+    const ro = sp.get("renderOnly") === "1";
+
+    setRenderOnly(ro);
+    setHomeUrl(`${window.location.origin}/`);
+
+    if (!fid) {
+      setReady(true);
+      return;
+    }
+
+    const base = window.location.origin;
+
+    setNetworkUrl(
+      `/api/network?fid=${encodeURIComponent(fid)}` +
+        `&mode=${encodeURIComponent(mode)}` +
+        `&minScore=${encodeURIComponent(minScore)}` +
+        `&limitEach=${encodeURIComponent(limitEach)}` +
+        `&maxEach=${encodeURIComponent(maxEach)}`
+    );
+
+    setImageUrl(
+      `${base}/api/map-image` +
+        `?fid=${encodeURIComponent(fid)}` +
+        `&mode=${encodeURIComponent(mode)}` +
+        `&minScore=${encodeURIComponent(minScore)}` +
+        `&limitEach=${encodeURIComponent(limitEach)}` +
+        `&maxEach=${encodeURIComponent(maxEach)}` +
+        `&w=${encodeURIComponent(w)}` +
+        `&h=${encodeURIComponent(h)}`
+    );
   }, []);
 
-  const homeUrl = useMemo(() => `${window.location.origin}/`, []);
-
-  // This URL is what we embed in the cast (generated PNG)
-  const imageUrl = useMemo(() => {
-    const { fid, mode, minScore, limitEach, maxEach, w, h } = params;
-    if (!fid) return "";
-    return (
-      `${window.location.origin}/api/map-image` +
-      `?fid=${encodeURIComponent(fid)}` +
-      `&mode=${encodeURIComponent(mode)}` +
-      `&minScore=${encodeURIComponent(minScore)}` +
-      `&limitEach=${encodeURIComponent(limitEach)}` +
-      `&maxEach=${encodeURIComponent(maxEach)}` +
-      `&w=${encodeURIComponent(w)}` +
-      `&h=${encodeURIComponent(h)}`
-    );
-  }, [params]);
-
   useEffect(() => {
-    const { fid, mode, minScore, limitEach, maxEach } = params;
-    if (!fid) return;
-
-    const url =
-      `/api/network?fid=${encodeURIComponent(fid)}` +
-      `&mode=${encodeURIComponent(mode)}` +
-      `&minScore=${encodeURIComponent(minScore)}` +
-      `&limitEach=${encodeURIComponent(limitEach)}` +
-      `&maxEach=${encodeURIComponent(maxEach)}`;
+    if (!networkUrl) return;
 
     (async () => {
       try {
-        const res = await fetch(url, { cache: "no-store" });
+        const res = await fetch(networkUrl, { cache: "no-store" });
         const text = await res.text();
-
         let json: any = null;
         try {
           json = text ? JSON.parse(text) : null;
@@ -94,7 +105,7 @@ export default function ShareMapPage() {
         setReady(true);
       }
     })();
-  }, [params]);
+  }, [networkUrl]);
 
   return (
     <div
@@ -105,7 +116,7 @@ export default function ShareMapPage() {
         margin: 0,
         padding: 0,
         overflow: "hidden",
-        background: params.renderOnly ? "#c7b3ff" : "#c7b3ff",
+        background: "#c7b3ff",
       }}
     >
       <ShareMapInner
@@ -113,7 +124,7 @@ export default function ShareMapPage() {
         ready={ready}
         imageUrl={imageUrl}
         homeUrl={homeUrl}
-        renderOnly={params.renderOnly}
+        renderOnly={renderOnly}
       />
     </div>
   );
