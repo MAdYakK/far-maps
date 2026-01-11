@@ -1,156 +1,160 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { sdk } from "@farcaster/miniapp-sdk";
 
 type Mode = "followers" | "following" | "both";
 
-function getOrigin() {
-  if (typeof window === "undefined") return "";
-  return window.location.origin;
+function getBaseUrl() {
+  // Prefer env on Vercel, fallback to window origin
+  const env = process.env.NEXT_PUBLIC_URL;
+  if (env && env.startsWith("http")) return env.replace(/\/+$/, "");
+  if (typeof window !== "undefined") return window.location.origin;
+  return "";
 }
 
 export default function ShareMapPage() {
-  const [ready, setReady] = useState(false);
-  const [imgUrl, setImgUrl] = useState<string>("");
-  const [absImgUrl, setAbsImgUrl] = useState<string>(""); // for embed sharing
-  const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
+
+  const [fid, setFid] = useState<number | null>(null);
+  const [mode, setMode] = useState<Mode>("both");
+
+  const [minScore, setMinScore] = useState("0.8");
+  const [limitEach, setLimitEach] = useState("800");
+  const [maxEach, setMaxEach] = useState("5000");
+  const [concurrency, setConcurrency] = useState("4");
+  const [hubPageSize, setHubPageSize] = useState("50");
+  const [hubDelayMs, setHubDelayMs] = useState("150");
+
+  const [imgOk, setImgOk] = useState<boolean | null>(null);
+  const [imgErr, setImgErr] = useState<string>("");
+
   const [sharing, setSharing] = useState(false);
 
-  const params = useMemo(() => {
-    const sp = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
-    const fid = sp.get("fid") || "";
-    const mode = (sp.get("mode") || "both") as Mode;
-    const minScore = sp.get("minScore") || "0.8";
-    const limitEach = sp.get("limitEach") || "800";
-    const maxEach = sp.get("maxEach") || "5000";
-    const concurrency = sp.get("concurrency") || "4";
-    const hubPageSize = sp.get("hubPageSize") || "50";
-    const hubDelayMs = sp.get("hubDelayMs") || "150";
-
-    return {
-      fid,
-      mode,
-      minScore,
-      limitEach,
-      maxEach,
-      concurrency,
-      hubPageSize,
-      hubDelayMs,
-    };
-  }, []);
-
+  // Pull params from query string; if missing fid, try sdk.context
   useEffect(() => {
     (async () => {
+      const sp = new URLSearchParams(window.location.search);
+
+      const qFid = sp.get("fid");
+      const qMode = (sp.get("mode") as Mode | null) ?? null;
+
+      if (qMode === "followers" || qMode === "following" || qMode === "both") setMode(qMode);
+
+      if (sp.get("minScore")) setMinScore(sp.get("minScore")!);
+      if (sp.get("limitEach")) setLimitEach(sp.get("limitEach")!);
+      if (sp.get("maxEach")) setMaxEach(sp.get("maxEach")!);
+      if (sp.get("concurrency")) setConcurrency(sp.get("concurrency")!);
+      if (sp.get("hubPageSize")) setHubPageSize(sp.get("hubPageSize")!);
+      if (sp.get("hubDelayMs")) setHubDelayMs(sp.get("hubDelayMs")!);
+
+      if (qFid && Number.isFinite(Number(qFid))) {
+        setFid(Number(qFid));
+        return;
+      }
+
+      // fallback: try context
       try {
         await sdk.actions.ready();
+        const ctx = await sdk.context;
+        const detectedFid =
+          ((ctx as any)?.viewer?.fid as number | undefined) ??
+          ((ctx as any)?.user?.fid as number | undefined);
+        if (detectedFid) setFid(detectedFid);
       } catch {
-        // ignore outside Warpcast
-      } finally {
-        setReady(true);
+        // ignore
       }
     })();
   }, []);
 
-  useEffect(() => {
-    if (!ready) return;
+  // ✅ Relative URL for rendering inside the app (avoids origin weirdness)
+  const imageSrc = useMemo(() => {
+    if (!fid) return "";
+    return (
+      `/api/map-image` +
+      `?fid=${encodeURIComponent(String(fid))}` +
+      `&mode=${encodeURIComponent(mode)}` +
+      `&minScore=${encodeURIComponent(minScore)}` +
+      `&limitEach=${encodeURIComponent(limitEach)}` +
+      `&maxEach=${encodeURIComponent(maxEach)}` +
+      `&concurrency=${encodeURIComponent(concurrency)}` +
+      `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
+      `&hubDelayMs=${encodeURIComponent(hubDelayMs)}` +
+      `&w=1000&h=1000` +
+      `&v=${Date.now()}` // bust cache for testing
+    );
+  }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs]);
 
-    try {
-      setError(null);
+  // ✅ Absolute URL for embedding in cast
+  const imageAbsolute = useMemo(() => {
+    if (!fid) return "";
+    const base = getBaseUrl();
+    if (!base) return "";
+    return `${base}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
+  }, [fid, imageSrc]);
 
-      if (!params.fid) {
-        setError("Missing fid in URL. Open from the main page.");
-        return;
-      }
+  async function shareCast() {
+    if (!fid || !imageAbsolute) return;
 
-      // ✅ Server-generated image of JUST the map area (no UI)
-      // If you want it tighter/less padding, adjust w/h or your /api/map-image renderer.
-      const qs =
-        `fid=${encodeURIComponent(params.fid)}` +
-        `&mode=${encodeURIComponent(params.mode)}` +
-        `&minScore=${encodeURIComponent(params.minScore)}` +
-        `&limitEach=${encodeURIComponent(params.limitEach)}` +
-        `&maxEach=${encodeURIComponent(params.maxEach)}` +
-        `&concurrency=${encodeURIComponent(params.concurrency)}` +
-        `&hubPageSize=${encodeURIComponent(params.hubPageSize)}` +
-        `&hubDelayMs=${encodeURIComponent(params.hubDelayMs)}` +
-        `&w=1000&h=1000`;
-
-      const rel = `/api/map-image?${qs}`;
-      const abs = `${getOrigin()}${rel}`;
-
-      setImgUrl(rel);
-      setAbsImgUrl(abs);
-    } catch (e: any) {
-      setError(e?.message || "Failed to build image URL");
-    }
-  }, [ready, params]);
-
-  async function goHome() {
-    try {
-      const url = `${getOrigin()}/`;
-      await sdk.actions.openUrl(url);
-    } catch {
-      window.location.href = "/";
-    }
-  }
-
-  async function shareImage() {
-    if (!absImgUrl) return;
     try {
       setSharing(true);
-      setError(null);
-
       await sdk.actions.composeCast({
         text: "My Farmap! Check out yours!",
-        embeds: [absImgUrl],
+        embeds: [imageAbsolute],
       });
     } catch (e: any) {
-      setError(e?.message || "Share failed (are you inside Warpcast?)");
+      setImgErr(e?.message || "Failed to share");
     } finally {
       setSharing(false);
     }
   }
 
   return (
-    <div
+    <main
       style={{
-        width: "100vw",
         height: "100vh",
+        width: "100vw",
         margin: 0,
         padding: 0,
         overflow: "hidden",
-        background: "#cbb7ff", // light purple
+        background: "#cdb7ff", // light purple
         display: "flex",
         flexDirection: "column",
       }}
     >
-      {/* Top pill bar */}
+      {/* Top bubble bar */}
       <div
         style={{
+          position: "relative",
+          zIndex: 10,
           padding: 12,
-          display: "flex",
-          gap: 8,
-          flexWrap: "wrap",
-          alignItems: "center",
         }}
       >
-        <PillButton onClick={goHome}>Home</PillButton>
-
-        <PillButton
-          onClick={() => {
-            if (!sharing) shareImage();
+        <div
+          style={{
+            borderRadius: 14,
+            background: "rgba(0,0,0,0.55)",
+            color: "white",
+            padding: 10,
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
           }}
         >
-          {sharing ? "Sharing…" : "Share"}
-        </PillButton>
+          <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
+          <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing}>
+            {sharing ? "Sharing…" : "Share Cast"}
+          </BubbleButton>
 
-        <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.75, color: "#1b0736" }}>
-          {params.mode} • score&gt;{params.minScore}
+          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
+            {fid ? `FID ${fid} • ${mode}` : "Loading…"}
+          </div>
         </div>
       </div>
 
-      {/* Centered frame */}
+      {/* Image frame */}
       <div
         style={{
           flex: 1,
@@ -161,117 +165,103 @@ export default function ShareMapPage() {
       >
         <div
           style={{
-            width: "min(92vw, 900px)",
-            height: "min(78vh, 900px)",
-            background: "rgba(27, 7, 54, 0.12)",
-            border: "1px solid rgba(27, 7, 54, 0.22)",
+            width: "min(92vw, 560px)",
+            aspectRatio: "1 / 1",
             borderRadius: 18,
-            padding: 14,
-            boxShadow: "0 12px 40px rgba(27, 7, 54, 0.20)",
-            display: "grid",
-            placeItems: "center",
+            background: "rgba(255,255,255,0.35)",
+            boxShadow: "0 14px 50px rgba(0,0,0,0.25)",
+            padding: 12,
           }}
         >
-          {!imgUrl ? (
-            <LoadingCard />
-          ) : (
-            <div
-              style={{
-                width: "100%",
-                height: "100%",
-                borderRadius: 14,
-                overflow: "hidden",
-                background: "#0b0614", // dark behind map tiles
-                display: "grid",
-                placeItems: "center",
-              }}
-            >
-              {/* ✅ Constrained to JUST the map image */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={imgUrl}
-                alt="Far Map"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "contain",
-                  display: "block",
-                }}
-              />
-            </div>
-          )}
-        </div>
-
-        {error && (
           <div
             style={{
-              marginTop: 10,
-              width: "min(92vw, 900px)",
-              padding: 10,
-              borderRadius: 12,
-              background: "rgba(0,0,0,0.35)",
-              color: "white",
-              fontSize: 12,
+              width: "100%",
+              height: "100%",
+              borderRadius: 14,
+              background: "rgba(0,0,0,0.15)",
+              overflow: "hidden",
+              position: "relative",
+              display: "grid",
+              placeItems: "center",
             }}
           >
-            {error}
-          </div>
-        )}
-      </div>
+            {!fid ? (
+              <div style={{ color: "rgba(0,0,0,0.75)", fontWeight: 700 }}>Loading…</div>
+            ) : (
+              <>
+                {/* If image fails, we show a helpful message */}
+                <img
+                  src={imageSrc}
+                  alt="Farmap"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onLoad={() => {
+                    setImgOk(true);
+                    setImgErr("");
+                  }}
+                  onError={() => {
+                    setImgOk(false);
+                    setImgErr("Map image failed to load (api/map-image returned an error).");
+                  }}
+                />
 
-      <style jsx global>{`
-        @keyframes spin {
-          to {
-            transform: rotate(360deg);
-          }
-        }
-      `}</style>
-    </div>
+                {imgOk === false ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "grid",
+                      placeItems: "center",
+                      padding: 14,
+                      textAlign: "center",
+                      background: "rgba(255,255,255,0.85)",
+                      color: "#2b1b55",
+                      fontWeight: 700,
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 14 }}>{imgErr}</div>
+                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, opacity: 0.9 }}>
+                        Try again in a moment (Pinata hub / Neynar can rate-limit).
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
   );
 }
 
-function PillButton({
-  children,
+function BubbleButton({
   onClick,
+  disabled,
+  children,
 }: {
-  children: React.ReactNode;
   onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={!!disabled}
       style={{
-        border: "1px solid rgba(27,7,54,0.25)",
-        background: "rgba(255,255,255,0.35)",
-        color: "#1b0736",
-        padding: "8px 12px",
+        border: "1px solid rgba(255,255,255,0.22)",
+        background: disabled ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.18)",
+        color: "white",
+        padding: "7px 12px",
         borderRadius: 999,
         fontSize: 12,
-        fontWeight: 700,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         userSelect: "none",
+        opacity: disabled ? 0.6 : 1,
       }}
     >
       {children}
     </button>
-  );
-}
-
-function LoadingCard() {
-  return (
-    <div style={{ display: "grid", placeItems: "center", gap: 10, color: "white" }}>
-      <div
-        style={{
-          width: 18,
-          height: 18,
-          borderRadius: 999,
-          border: "3px solid rgba(255,255,255,0.25)",
-          borderTopColor: "white",
-          animation: "spin 0.9s linear infinite",
-        }}
-      />
-      <div style={{ fontSize: 12, opacity: 0.9 }}>Generating map image…</div>
-    </div>
   );
 }
