@@ -20,7 +20,6 @@ type PinPoint = {
   users: PinUser[];
 };
 
-// ✅ Type the dynamic import so ShareMapInner accepts props
 const ShareMapInner = dynamic(
   () => import("./share-map-inner").then((m) => m.default),
   { ssr: false }
@@ -29,13 +28,13 @@ const ShareMapInner = dynamic(
   ready: boolean;
   imageUrl: string;
   homeUrl: string;
+  renderOnly: boolean;
 }>;
 
 export default function ShareMapPage() {
   const [points, setPoints] = useState<PinPoint[]>([]);
   const [ready, setReady] = useState(false);
 
-  // Read query params once
   const params = useMemo(() => {
     const sp = new URLSearchParams(window.location.search);
     const fid = sp.get("fid") || "";
@@ -45,15 +44,16 @@ export default function ShareMapPage() {
     const maxEach = sp.get("maxEach") || "5000";
     const w = sp.get("w") || "1000";
     const h = sp.get("h") || "1000";
-
-    return { fid, mode, minScore, limitEach, maxEach, w, h };
+    const renderOnly = sp.get("renderOnly") === "1";
+    return { fid, mode, minScore, limitEach, maxEach, w, h, renderOnly };
   }, []);
 
-  // ✅ This is the URL we will embed in the cast (image URL)
+  const homeUrl = useMemo(() => `${window.location.origin}/`, []);
+
+  // This URL is what we embed in the cast (generated PNG)
   const imageUrl = useMemo(() => {
     const { fid, mode, minScore, limitEach, maxEach, w, h } = params;
     if (!fid) return "";
-
     return (
       `${window.location.origin}/api/map-image` +
       `?fid=${encodeURIComponent(fid)}` +
@@ -65,9 +65,6 @@ export default function ShareMapPage() {
       `&h=${encodeURIComponent(h)}`
     );
   }, [params]);
-
-  // Home should go to main page
-  const homeUrl = useMemo(() => `${window.location.origin}/`, []);
 
   useEffect(() => {
     const { fid, mode, minScore, limitEach, maxEach } = params;
@@ -108,10 +105,16 @@ export default function ShareMapPage() {
         margin: 0,
         padding: 0,
         overflow: "hidden",
-        background: "#000", // this can be overridden in inner page styling
+        background: params.renderOnly ? "#c7b3ff" : "#c7b3ff",
       }}
     >
-      <ShareMapInner points={points} ready={ready} imageUrl={imageUrl} homeUrl={homeUrl} />
+      <ShareMapInner
+        points={points}
+        ready={ready}
+        imageUrl={imageUrl}
+        homeUrl={homeUrl}
+        renderOnly={params.renderOnly}
+      />
     </div>
   );
 }

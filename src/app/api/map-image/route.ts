@@ -1,6 +1,6 @@
-// src/app/api/map-image/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
 import puppeteer from "puppeteer-core";
@@ -8,216 +8,138 @@ import chromium from "@sparticuz/chromium";
 
 type Mode = "followers" | "following" | "both";
 
-type PinUser = {
-  fid: number;
-  username: string;
-  display_name?: string;
-  pfp_url?: string;
-  score: number;
-};
-
-type PinPoint = {
-  lat: number;
-  lng: number;
-  city: string;
-  count: number;
-  users: PinUser[];
-};
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function mustEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
 }
 
-function numParam(sp: URLSearchParams, key: string, fallback: number) {
-  const v = Number(sp.get(key));
-  return Number.isFinite(v) ? v : fallback;
+function getBaseUrl(req: Request) {
+  // Prefer explicit URL if you have it, else infer from request
+  const envUrl =
+    process.env.NEXT_PUBLIC_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.VERCEL_URL;
+
+  if (envUrl) {
+    const u = envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
+    return u.replace(/\/+$/, "");
+  }
+
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  return `${proto}://${host}`.replace(/\/+$/, "");
 }
 
-function strParam(sp: URLSearchParams, key: string, fallback: string) {
-  const v = sp.get(key);
-  return v && v.length ? v : fallback;
-}
-
-function modeParam(sp: URLSearchParams, key: string, fallback: Mode): Mode {
-  const v = sp.get(key);
-  if (v === "followers" || v === "following" || v === "both") return v;
-  return fallback;
-}
-
-function getOrigin(req: Request) {
-  const u = new URL(req.url);
-  const proto = req.headers.get("x-forwarded-proto") || u.protocol.replace(":", "");
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || u.host;
-  return `${proto}://${host}`;
-}
-
-function escapeHtml(s: string) {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function buildLeafletHtml(points: PinPoint[], w: number, h: number) {
-  const safePoints = points
-    .filter(
-      (p) =>
-        typeof p.lat === "number" &&
-        typeof p.lng === "number" &&
-        Number.isFinite(p.lat) &&
-        Number.isFinite(p.lng)
-    )
-    .map((p) => ({
-      lat: p.lat,
-      lng: p.lng,
-      count: typeof p.count === "number" ? p.count : 1,
-      city: escapeHtml(p.city || "Unknown"),
-    }));
-
-  const pointsJson = JSON.stringify(safePoints);
-
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=${w}, height=${h}, initial-scale=1" />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      crossorigin=""
-    />
-    <style>
-      html, body { margin:0; padding:0; width:${w}px; height:${h}px; background:#111; overflow:hidden; }
-      #map { width:${w}px; height:${h}px; }
-      .leaflet-control-container { display:none; }
-    </style>
-  </head>
-  <body>
-    <div id="map"></div>
-
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-
-    <script>
-      const points = ${pointsJson};
-
-      const map = L.map('map', {
-        zoomControl: false,
-        attributionControl: false,
-        preferCanvas: true
-      });
-
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 18
-      }).addTo(map);
-
-      if (!points.length) {
-        map.setView([20, 0], 2);
-      } else {
-        const latlngs = points.map(p => [p.lat, p.lng]);
-        const bounds = L.latLngBounds(latlngs);
-        map.fitBounds(bounds, { padding: [24, 24] });
-      }
-
-      points.forEach(p => {
-        const r =
-          p.count >= 25 ? 4 :
-          p.count >= 10 ? 3.5 :
-          p.count >= 5  ? 3 :
-          p.count >= 2  ? 2.5 : 2;
-
-        L.circleMarker([p.lat, p.lng], {
-          radius: r,
-          weight: 0,
-          fillOpacity: 0.9
-        }).addTo(map);
-      });
-
-      window.__MAP_READY__ = true;
-    </script>
-  </body>
-</html>`;
+async function fetchJson(url: string, init?: RequestInit) {
+  const res = await fetch(url, init);
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  if (!res.ok) {
+    const msg =
+      json?.error ||
+      json?.message ||
+      `HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`;
+    throw new Error(msg);
+  }
+  if (!json) throw new Error("Empty/non-JSON response");
+  return json;
 }
 
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    const fid = numParam(searchParams, "fid", NaN);
-    if (!Number.isFinite(fid) || fid <= 0) {
+    const fidStr = searchParams.get("fid");
+    const fid = fidStr ? Number(fidStr) : NaN;
+    if (!fidStr || !Number.isFinite(fid) || fid <= 0) {
       return NextResponse.json({ error: "Missing or invalid fid" }, { status: 400 });
     }
 
-    const mode = modeParam(searchParams, "mode", "both");
-    const minScore = strParam(searchParams, "minScore", "0.8");
-    const limitEach = strParam(searchParams, "limitEach", "800");
-    const maxEach = strParam(searchParams, "maxEach", "5000");
-    const concurrency = strParam(searchParams, "concurrency", "4");
-    const hubPageSize = strParam(searchParams, "hubPageSize", "50");
-    const hubDelayMs = strParam(searchParams, "hubDelayMs", "150");
+    const mode = (searchParams.get("mode") || "both") as Mode;
+    if (mode !== "followers" && mode !== "following" && mode !== "both") {
+      return NextResponse.json({ error: "Invalid mode" }, { status: 400 });
+    }
 
-    const w = Math.max(300, Math.min(2000, numParam(searchParams, "w", 1000)));
-    const h = Math.max(300, Math.min(2000, numParam(searchParams, "h", 1000)));
+    const minScore = Number(searchParams.get("minScore") || "0.8");
+    const limitEach = searchParams.get("limitEach") || "800";
+    const maxEach = searchParams.get("maxEach") || "5000";
 
-    const origin = getOrigin(req);
+    const w = Math.min(1600, Math.max(600, Number(searchParams.get("w") || "1000")));
+    const h = Math.min(1600, Math.max(600, Number(searchParams.get("h") || "1000")));
+
+    const baseUrl = getBaseUrl(req);
+
+    // Pull points once (same data the share map uses)
     const networkUrl =
-      `${origin}/api/network?fid=${encodeURIComponent(String(fid))}` +
+      `${baseUrl}/api/network` +
+      `?fid=${encodeURIComponent(String(fid))}` +
       `&mode=${encodeURIComponent(mode)}` +
-      `&minScore=${encodeURIComponent(minScore)}` +
-      `&limitEach=${encodeURIComponent(limitEach)}` +
-      `&maxEach=${encodeURIComponent(maxEach)}` +
-      `&concurrency=${encodeURIComponent(concurrency)}` +
-      `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
-      `&hubDelayMs=${encodeURIComponent(hubDelayMs)}`;
+      `&minScore=${encodeURIComponent(String(minScore))}` +
+      `&limitEach=${encodeURIComponent(String(limitEach))}` +
+      `&maxEach=${encodeURIComponent(String(maxEach))}` +
+      `&cacheBust=${Date.now()}`;
 
-    const netRes = await fetch(networkUrl, { cache: "no-store" });
-    const netText = await netRes.text();
+    const networkJson = await fetchJson(networkUrl, { cache: "no-store" });
+    const points = Array.isArray(networkJson?.points) ? networkJson.points : [];
 
-    let netJson: any = null;
-    try {
-      netJson = netText ? JSON.parse(netText) : null;
-    } catch {
-      netJson = null;
-    }
+    // Build render-only share URL (no UI)
+    const shareUrl =
+      `${baseUrl}/share/map` +
+      `?fid=${encodeURIComponent(String(fid))}` +
+      `&mode=${encodeURIComponent(mode)}` +
+      `&minScore=${encodeURIComponent(String(minScore))}` +
+      `&limitEach=${encodeURIComponent(String(limitEach))}` +
+      `&maxEach=${encodeURIComponent(String(maxEach))}` +
+      `&w=${encodeURIComponent(String(w))}` +
+      `&h=${encodeURIComponent(String(h))}` +
+      `&renderOnly=1` +
+      `&cacheBust=${Date.now()}`;
 
-    if (!netRes.ok) {
-      const msg =
-        netJson?.error ||
-        `network error ${netRes.status} ${netRes.statusText}${
-          netText ? ` — ${netText.slice(0, 200)}` : ""
-        }`;
-      return NextResponse.json({ error: msg }, { status: 500 });
-    }
-
-    const points: PinPoint[] = Array.isArray(netJson?.points) ? netJson.points : [];
-    const html = buildLeafletHtml(points, w, h);
-
+    // Launch headless chromium (Vercel-safe)
     const executablePath = await chromium.executablePath();
 
     const browser = await puppeteer.launch({
       args: chromium.args,
-      defaultViewport: { width: w, height: h, deviceScaleFactor: 2 },
       executablePath,
       headless: true,
-    });
+      defaultViewport: { width: w, height: h, deviceScaleFactor: 2 },
+    } as any);
 
     try {
       const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: "domcontentloaded" });
 
-      await page
-        .waitForFunction("window.__MAP_READY__ === true", { timeout: 8000 })
-        .catch(() => {});
+      // Reduce flaky renders
+      await page.setRequestInterception(true);
+      page.on("request", (r) => {
+        // Block heavy stuff we don't need
+        const type = r.resourceType();
+        if (type === "font") return r.abort();
+        return r.continue();
+      });
 
-      await sleep(1400);
+      await page.goto(shareUrl, { waitUntil: "networkidle2", timeout: 45_000 });
 
-      const png = await page.screenshot({ type: "png" });
+      // Wait for Leaflet bounds + rendering to finish
+      await page.waitForFunction("window.__FARMAPS_MAP_READY__ === true", {
+        timeout: 30_000,
+      });
 
-      return new Response(png as Buffer, {
+      // Screenshot ONLY the framed map area
+      const el = await page.$("#farmaps-capture-frame");
+      if (!el) throw new Error("Capture frame not found (#farmaps-capture-frame)");
+
+      const png = (await el.screenshot({ type: "png" })) as Buffer;
+
+      return new NextResponse(png, {
         headers: {
-          "content-type": "image/png",
-          "cache-control": "no-store",
+          "Content-Type": "image/png",
+          "Cache-Control": "no-store, max-age=0",
         },
       });
     } finally {
@@ -226,7 +148,9 @@ export async function GET(req: Request) {
   } catch (e: any) {
     console.error("api/map-image error:", e);
     return NextResponse.json(
-      { error: e?.message || "Server error", detail: String(e?.stack || "") },
+      {
+        error: e?.message || "map-image failed",
+      },
       { status: 500 }
     );
   }
