@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import puppeteer from "puppeteer-core";
-import chromium from "@sparticuz/chromium-min";
+import chromium from "@sparticuz/chromium";
 
 type Mode = "followers" | "following" | "both";
 
@@ -83,14 +83,11 @@ function buildLeafletHtml(points: PinPoint[], w: number, h: number) {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=${w}, height=${h}, initial-scale=1" />
-
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin=""
     />
-
     <style>
       html, body { margin:0; padding:0; width:${w}px; height:${h}px; background:#111; overflow:hidden; }
       #map { width:${w}px; height:${h}px; }
@@ -100,11 +97,7 @@ function buildLeafletHtml(points: PinPoint[], w: number, h: number) {
   <body>
     <div id="map"></div>
 
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin=""
-    ></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
     <script>
       const points = ${pointsJson};
@@ -180,6 +173,7 @@ export async function GET(req: Request) {
 
     const netRes = await fetch(networkUrl, { cache: "no-store" });
     const netText = await netRes.text();
+
     let netJson: any = null;
     try {
       netJson = netText ? JSON.parse(netText) : null;
@@ -199,11 +193,13 @@ export async function GET(req: Request) {
     const points: PinPoint[] = Array.isArray(netJson?.points) ? netJson.points : [];
     const html = buildLeafletHtml(points, w, h);
 
+    const executablePath = await chromium.executablePath();
+
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: { width: w, height: h, deviceScaleFactor: 2 },
-      executablePath: await chromium.executablePath(),
-      headless: true, // ✅ fixes TS error in older puppeteer-core types
+      executablePath,
+      headless: true,
     });
 
     try {
@@ -211,10 +207,10 @@ export async function GET(req: Request) {
       await page.setContent(html, { waitUntil: "domcontentloaded" });
 
       await page
-        .waitForFunction("window.__MAP_READY__ === true", { timeout: 5000 })
+        .waitForFunction("window.__MAP_READY__ === true", { timeout: 8000 })
         .catch(() => {});
 
-      await sleep(1200);
+      await sleep(1400);
 
       const png = await page.screenshot({ type: "png" });
 
@@ -229,6 +225,9 @@ export async function GET(req: Request) {
     }
   } catch (e: any) {
     console.error("api/map-image error:", e);
-    return NextResponse.json({ error: e?.message || "Server error" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Server error", detail: String(e?.stack || "") },
+      { status: 500 }
+    );
   }
 }

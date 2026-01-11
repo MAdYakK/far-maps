@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Ensure scrapers (Warpcast/Farcaster) receive a fully-rendered <head>
-  // instead of streamed metadata that may omit fc:miniapp at fetch time.
-  htmlLimitedBots: /Farcaster|Warpcast|MiniApp|bot|crawler|spider/i,
+  // ✅ Important: ensure these stay as external node_modules so chromium's bin files exist at runtime
+  serverExternalPackages: ["puppeteer-core", "@sparticuz/chromium"],
 };
 
 export default nextConfig;

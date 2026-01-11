@@ -11,7 +11,7 @@
   "dependencies": {
     "@farcaster/hub-web": "^0.11.7",
     "@farcaster/miniapp-sdk": "^0.2.1",
-    "@sparticuz/chromium-min": "^143.0.4",
+    "@sparticuz/chromium": "^143.0.4",
     "leaflet": "^1.9.4",
     "lru-cache": "^11.2.4",
     "next": "16.1.1",
