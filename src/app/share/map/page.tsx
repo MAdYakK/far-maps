@@ -29,8 +29,13 @@ export default function ShareMapPage() {
 
   const [imgOk, setImgOk] = useState<boolean | null>(null);
   const [imgErr, setImgErr] = useState<string>("");
-
   const [sharing, setSharing] = useState(false);
+
+  // loading overlay control
+  const [loadingImg, setLoadingImg] = useState(true);
+
+  // bump this to force image reload
+  const [reloadNonce, setReloadNonce] = useState<number>(() => Date.now());
 
   // Pull params from query string; if missing fid, try sdk.context
   useEffect(() => {
@@ -68,7 +73,7 @@ export default function ShareMapPage() {
     })();
   }, []);
 
-  // ✅ Relative URL for rendering inside the app (avoids origin weirdness)
+  // ✅ Relative URL for rendering inside the app
   const imageSrc = useMemo(() => {
     if (!fid) return "";
     return (
@@ -82,9 +87,9 @@ export default function ShareMapPage() {
       `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
       `&hubDelayMs=${encodeURIComponent(hubDelayMs)}` +
       `&w=1000&h=1000` +
-      `&v=${Date.now()}` // bust cache for testing
+      `&v=${encodeURIComponent(String(reloadNonce))}` // cache-bust on reload
     );
-  }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs]);
+  }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs, reloadNonce]);
 
   // ✅ Absolute URL for embedding in cast
   const imageAbsolute = useMemo(() => {
@@ -110,6 +115,14 @@ export default function ShareMapPage() {
     }
   }
 
+  function reloadImage() {
+    // show spinner immediately and bust cache
+    setLoadingImg(true);
+    setImgOk(null);
+    setImgErr("");
+    setReloadNonce(Date.now());
+  }
+
   return (
     <main
       style={{
@@ -124,13 +137,7 @@ export default function ShareMapPage() {
       }}
     >
       {/* Top bubble bar */}
-      <div
-        style={{
-          position: "relative",
-          zIndex: 10,
-          padding: 12,
-        }}
-      >
+      <div style={{ position: "relative", zIndex: 10, padding: 12 }}>
         <div
           style={{
             borderRadius: 14,
@@ -144,8 +151,13 @@ export default function ShareMapPage() {
           }}
         >
           <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
+
+          <BubbleButton onClick={reloadImage} disabled={!fid || sharing}>
+            Reload
+          </BubbleButton>
+
           <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing}>
-            {sharing ? "Sharing…" : "Share Cast"}
+            {sharing ? "Sharing…" : "Share"}
           </BubbleButton>
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
@@ -171,6 +183,7 @@ export default function ShareMapPage() {
             background: "rgba(255,255,255,0.35)",
             boxShadow: "0 14px 50px rgba(0,0,0,0.25)",
             padding: 12,
+            position: "relative",
           }}
         >
           <div
@@ -181,15 +194,23 @@ export default function ShareMapPage() {
               background: "rgba(0,0,0,0.15)",
               overflow: "hidden",
               position: "relative",
-              display: "grid",
-              placeItems: "center",
             }}
           >
             {!fid ? (
-              <div style={{ color: "rgba(0,0,0,0.75)", fontWeight: 700 }}>Loading…</div>
+              <div
+                style={{
+                  height: "100%",
+                  width: "100%",
+                  display: "grid",
+                  placeItems: "center",
+                  color: "rgba(0,0,0,0.75)",
+                  fontWeight: 800,
+                }}
+              >
+                Loading…
+              </div>
             ) : (
               <>
-                {/* If image fails, we show a helpful message */}
                 <img
                   src={imageSrc}
                   alt="Farmap"
@@ -197,31 +218,87 @@ export default function ShareMapPage() {
                   onLoad={() => {
                     setImgOk(true);
                     setImgErr("");
+                    setLoadingImg(false);
                   }}
                   onError={() => {
                     setImgOk(false);
                     setImgErr("Map image failed to load (api/map-image returned an error).");
+                    setLoadingImg(false);
                   }}
                 />
 
+                {/* Loading overlay */}
+                {loadingImg && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      zIndex: 20,
+                      background: "rgba(0,0,0,0.35)",
+                      display: "grid",
+                      placeItems: "center",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 320,
+                        borderRadius: 16,
+                        background: "rgba(0,0,0,0.65)",
+                        color: "white",
+                        padding: 14,
+                        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                        <div
+                          style={{
+                            width: 18,
+                            height: 18,
+                            borderRadius: 999,
+                            border: "3px solid rgba(255,255,255,0.25)",
+                            borderTopColor: "white",
+                            animation: "spin 0.9s linear infinite",
+                          }}
+                        />
+                        <div style={{ fontWeight: 800 }}>Loading Farmap</div>
+                      </div>
+
+                      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+                        Loading map image…
+                      </div>
+                    </div>
+
+                    <style jsx global>{`
+                      @keyframes spin {
+                        to {
+                          transform: rotate(360deg);
+                        }
+                      }
+                    `}</style>
+                  </div>
+                )}
+
+                {/* Error overlay */}
                 {imgOk === false ? (
                   <div
                     style={{
                       position: "absolute",
                       inset: 0,
+                      zIndex: 30,
                       display: "grid",
                       placeItems: "center",
                       padding: 14,
                       textAlign: "center",
                       background: "rgba(255,255,255,0.85)",
                       color: "#2b1b55",
-                      fontWeight: 700,
+                      fontWeight: 800,
                     }}
                   >
                     <div>
                       <div style={{ fontSize: 14 }}>{imgErr}</div>
-                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, opacity: 0.9 }}>
-                        Try again in a moment (Pinata hub / Neynar can rate-limit).
+                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, opacity: 0.9 }}>
+                        Try Reload (Pinata hub / Neynar can rate-limit).
                       </div>
                     </div>
                   </div>

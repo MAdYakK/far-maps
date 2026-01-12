@@ -63,7 +63,6 @@ function escapeHtml(s: string) {
 }
 
 function legendBuckets(points: NetworkResp["points"]) {
-  // buckets based on point.count
   const b = {
     one: 0,
     twoThree: 0,
@@ -133,8 +132,7 @@ export async function GET(req: Request) {
     const data = json as NetworkResp;
 
     const points = Array.isArray(data.points) ? data.points : [];
-    // draw small first, big last (big on top)
-    const ordered = [...points].sort((a, b) => a.count - b.count);
+    const ordered = [...points].sort((a, b) => a.count - b.count); // big last -> top
 
     const totalPins = ordered.length;
     const totalUsers = ordered.reduce((acc, p) => acc + (p.users?.length || 0), 0);
@@ -144,10 +142,6 @@ export async function GET(req: Request) {
     const viewerName =
       data.viewer?.display_name ||
       data.viewer?.username ||
-      (ordered.find((p) => p.users?.some((u) => u.fid === fid))?.users?.find((u) => u.fid === fid)
-        ?.display_name ||
-        ordered.find((p) => p.users?.some((u) => u.fid === fid))?.users?.find((u) => u.fid === fid)
-          ?.username) ||
       `FID ${fid}`;
 
     const safeName = escapeHtml(viewerName);
@@ -160,26 +154,31 @@ export async function GET(req: Request) {
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
       html, body { margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden; background:#cdb7ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+
+      /* Fill the whole image with the map inside a rounded card */
       #frame {
         position: relative;
         width: ${w}px;
         height: ${h}px;
         background: #cdb7ff;
-        display:flex;
-        align-items:center;
-        justify-content:center;
+        padding: 14px;
+        box-sizing: border-box;
       }
+
       #card {
         position: relative;
-        width: ${w}px;
-        height: ${h}px;
+        width: 100%;
+        height: 100%;
         background: rgba(255,255,255,0.35);
         box-shadow: 0 18px 60px rgba(0,0,0,0.25);
         border-radius: 26px;
         padding: 14px;
         box-sizing: border-box;
       }
-      #map {
+
+      /* MAP should fill card interior */
+      #mapWrap {
+        position: relative;
         width: 100%;
         height: 100%;
         border-radius: 20px;
@@ -187,24 +186,33 @@ export async function GET(req: Request) {
         background: rgba(0,0,0,0.12);
       }
 
+      #map {
+        position:absolute;
+        inset:0;
+      }
+
       /* subtle vignette */
       #vignette {
         pointer-events:none;
         position:absolute;
-        inset: 14px;
+        inset: 0;
         border-radius: 20px;
         box-shadow: inset 0 0 0 1px rgba(0,0,0,0.10), inset 0 0 60px rgba(0,0,0,0.12);
+        z-index: 5;
       }
 
-      #overlay {
+      /* Bottom overlay INSIDE map */
+      #bottomOverlay {
         position: absolute;
-        right: 28px;
-        bottom: 28px;
+        left: 14px;
+        right: 14px;
+        bottom: 14px;
         display: flex;
-        flex-direction: column;
-        gap: 10px;
+        justify-content: space-between;
         align-items: flex-end;
+        gap: 12px;
         pointer-events: none;
+        z-index: 10;
       }
 
       .pill {
@@ -213,17 +221,17 @@ export async function GET(req: Request) {
         padding: 8px 12px;
         border-radius: 999px;
         font-size: 13px;
-        font-weight: 700;
+        font-weight: 800;
         letter-spacing: 0.2px;
         box-shadow: 0 10px 28px rgba(0,0,0,0.25);
-        max-width: ${Math.min(w - 80, 520)}px;
+        max-width: 60%;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
       .legend {
-        width: 260px;
+        width: 270px;
         background: rgba(0,0,0,0.60);
         color: white;
         border-radius: 16px;
@@ -232,7 +240,7 @@ export async function GET(req: Request) {
       }
 
       .legendTitle {
-        font-weight: 800;
+        font-weight: 900;
         font-size: 12px;
         opacity: 0.95;
         display:flex;
@@ -263,55 +271,60 @@ export async function GET(req: Request) {
         box-sizing: border-box;
       }
 
-      .muted { opacity: 0.85; font-weight: 600; }
+      .muted { opacity: 0.85; font-weight: 700; }
     </style>
   </head>
   <body>
     <div id="frame">
       <div id="card">
-        <div id="map"></div>
-        <div id="vignette"></div>
+        <div id="mapWrap">
+          <div id="map"></div>
 
-        <div id="overlay">
-          <div class="pill">Far Maps • ${safeName}</div>
+          <div id="vignette"></div>
 
-          <div class="legend">
-            <div class="legendTitle">
-              <span>Legend</span>
-              <span class="muted">${totalPins} pins • ${totalUsers} users</span>
-            </div>
-
-            <div class="legendRow">
-              <div class="left">
-                <span class="dot" style="background:#84CC16;"></span>
-                <span>1 user</span>
+          <div id="bottomOverlay">
+            <!-- legend bottom-left -->
+            <div class="legend">
+              <div class="legendTitle">
+                <span>Legend</span>
+                <span class="muted">${totalPins} pins • ${totalUsers} users</span>
               </div>
-              <span class="muted">${buckets.one} pins</span>
+
+              <div class="legendRow">
+                <div class="left">
+                  <span class="dot" style="background:#84CC16;"></span>
+                  <span>1 user</span>
+                </div>
+                <span class="muted">${buckets.one} pins</span>
+              </div>
+
+              <div class="legendRow">
+                <div class="left">
+                  <span class="dot" style="background:#F59E0B;"></span>
+                  <span>2–3 users</span>
+                </div>
+                <span class="muted">${buckets.twoThree} pins</span>
+              </div>
+
+              <div class="legendRow">
+                <div class="left">
+                  <span class="dot" style="background:#06B6D4;"></span>
+                  <span>4–7 users</span>
+                </div>
+                <span class="muted">${buckets.fourSeven} pins</span>
+              </div>
+
+              <div class="legendRow">
+                <div class="left">
+                  <span class="dot" style="background:#7C3AED;"></span>
+                  <span>8+ users</span>
+                </div>
+                <span class="muted">${buckets.eightPlus} pins</span>
+              </div>
             </div>
 
-            <div class="legendRow">
-              <div class="left">
-                <span class="dot" style="background:#F59E0B;"></span>
-                <span>2–3 users</span>
-              </div>
-              <span class="muted">${buckets.twoThree} pins</span>
-            </div>
-
-            <div class="legendRow">
-              <div class="left">
-                <span class="dot" style="background:#06B6D4;"></span>
-                <span>4–7 users</span>
-              </div>
-              <span class="muted">${buckets.fourSeven} pins</span>
-            </div>
-
-            <div class="legendRow">
-              <div class="left">
-                <span class="dot" style="background:#7C3AED;"></span>
-                <span>8+ users</span>
-              </div>
-              <span class="muted">${buckets.eightPlus} pins</span>
-            </div>
+            <!-- watermark bottom-right -->
+            <div class="pill">Far Maps • ${safeName}</div>
           </div>
         </div>
       </div>
@@ -346,7 +359,7 @@ export async function GET(req: Request) {
         bounds: WORLD_BOUNDS
       }).addTo(map);
 
-      // Same bounds logic as ShareMapInner:
+      // same bounds logic as share view
       if (!points.length) {
         map.setView([20, 0], 2);
       } else if (points.length === 1) {
@@ -356,7 +369,7 @@ export async function GET(req: Request) {
         map.fitBounds(b, { padding: [30, 30] });
       }
 
-      // Add markers (already ordered small->big so big is drawn last/top)
+      // markers (small first, big last)
       for (const p of points) {
         const s = markerStyle(p.count);
         L.circleMarker([p.lat, p.lng], {
