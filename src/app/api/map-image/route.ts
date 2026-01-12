@@ -6,13 +6,9 @@ import chromium from "@sparticuz/chromium";
 
 type Mode = "followers" | "following" | "both";
 
-type NetworkResp = {
+type NetworkResponse = {
   fid: number;
   mode: Mode;
-  minScore: number;
-  limitEach: string | number;
-  maxEach?: number;
-  count: number;
   points: Array<{
     lat: number;
     lng: number;
@@ -26,86 +22,121 @@ type NetworkResp = {
       score: number;
     }>;
   }>;
-  viewer?: {
-    fid: number;
-    username?: string;
-    display_name?: string;
-    pfp_url?: string;
-  };
 };
 
-function num(sp: URLSearchParams, key: string, def: number) {
+function mustEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
+}
+
+function clamp(n: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function parseNum(sp: URLSearchParams, key: string, d: number) {
   const v = Number(sp.get(key));
-  return Number.isFinite(v) ? v : def;
+  return Number.isFinite(v) ? v : d;
 }
 
-function str(sp: URLSearchParams, key: string, def: string) {
-  return sp.get(key) ?? def;
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
 }
 
-function mode(sp: URLSearchParams, def: Mode): Mode {
-  const m = (sp.get("mode") || def) as Mode;
-  return m === "followers" || m === "following" || m === "both" ? m : def;
-}
+function computeBounds(points: { lat: number; lng: number }[]) {
+  if (!points.length) return null;
 
-function getOriginFromReq(req: Request) {
-  const host = req.headers.get("host") || "";
-  const proto = host.includes("localhost") || host.startsWith("127.0.0.1") ? "http" : "https";
-  return `${proto}://${host}`;
-}
-
-function escapeHtml(s: string) {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function legendBuckets(points: NetworkResp["points"]) {
-  const b = {
-    one: 0,
-    twoThree: 0,
-    fourSeven: 0,
-    eightPlus: 0,
-  };
+  let minLat = 90,
+    maxLat = -90,
+    minLng = 180,
+    maxLng = -180;
 
   for (const p of points) {
-    if (p.count >= 8) b.eightPlus++;
-    else if (p.count >= 4) b.fourSeven++;
-    else if (p.count >= 2) b.twoThree++;
-    else b.one++;
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
   }
 
-  return b;
+  if (minLat > maxLat || minLng > maxLng) return null;
+
+  // If all points are the same coordinate, expand slightly so fitBounds works nicely
+  if (minLat === maxLat) {
+    minLat -= 0.25;
+    maxLat += 0.25;
+  }
+  if (minLng === maxLng) {
+    minLng -= 0.25;
+    maxLng += 0.25;
+  }
+
+  return {
+    sw: [round2(minLat), round2(minLng)],
+    ne: [round2(maxLat), round2(maxLng)],
+  };
+}
+
+function bucketLabel(count: number) {
+  if (count >= 8) return "8+ users";
+  if (count >= 4) return "4–7 users";
+  if (count >= 2) return "2–3 users";
+  return "1 user";
+}
+
+function bucketKey(count: number) {
+  if (count >= 8) return "b8";
+  if (count >= 4) return "b4";
+  if (count >= 2) return "b2";
+  return "b1";
+}
+
+function bucketColor(key: string) {
+  // High contrast on OSM water/land
+  // b1 = lime, b2 = orange, b4 = cyan, b8 = purple
+  if (key === "b8") return "#6D28D9";
+  if (key === "b4") return "#06B6D4";
+  if (key === "b2") return "#F59E0B";
+  return "#84CC16";
 }
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const sp = url.searchParams;
 
-  const fid = num(sp, "fid", NaN as any);
-  if (!Number.isFinite(fid) || fid <= 0) {
-    return NextResponse.json({ error: "Missing/invalid fid" }, { status: 400 });
-  }
-
-  const m = mode(sp, "both");
-  const minScore = str(sp, "minScore", "0.8");
-  const limitEach = str(sp, "limitEach", "800");
-  const maxEach = str(sp, "maxEach", "5000");
-  const concurrency = str(sp, "concurrency", "4");
-  const hubPageSize = str(sp, "hubPageSize", "50");
-  const hubDelayMs = str(sp, "hubDelayMs", "150");
-
-  const w = Math.min(Math.max(num(sp, "w", 1000), 400), 1600);
-  const h = Math.min(Math.max(num(sp, "h", 1000), 400), 1600);
-
   try {
-    const origin = getOriginFromReq(req);
+    const fid = parseNum(sp, "fid", NaN);
+    if (!Number.isFinite(fid) || fid <= 0) {
+      return NextResponse.json({ error: "Missing or invalid fid" }, { status: 400 });
+    }
 
+    const mode = (sp.get("mode") || "both") as Mode;
+    if (mode !== "followers" && mode !== "following" && mode !== "both") {
+      return NextResponse.json({ error: "Invalid mode" }, { status: 400 });
+    }
+
+    const minScore = sp.get("minScore") || "0.8";
+    const limitEach = sp.get("limitEach") || "800";
+    const maxEach = sp.get("maxEach") || "5000";
+    const concurrency = sp.get("concurrency") || "4";
+    const hubPageSize = sp.get("hubPageSize") || "50";
+    const hubDelayMs = sp.get("hubDelayMs") || "150";
+
+    const w = clamp(parseNum(sp, "w", 1000), 600, 2000);
+    const h = clamp(parseNum(sp, "h", 1000), 600, 2000);
+
+    // Pull username from network payload (we’ll use the first user that matches fid when possible)
+    const base =
+      process.env.NEXT_PUBLIC_URL && process.env.NEXT_PUBLIC_URL.startsWith("http")
+        ? process.env.NEXT_PUBLIC_URL.replace(/\/+$/, "")
+        : "";
+
+    // Use an internal fetch to your own /api/network endpoint
+    // NOTE: use absolute on server if possible, fallback to relative (Vercel should still work with absolute)
     const networkUrl =
-      `${origin}/api/network?fid=${encodeURIComponent(String(fid))}` +
-      `&mode=${encodeURIComponent(m)}` +
+      (base ? `${base}` : "") +
+      `/api/network?fid=${encodeURIComponent(String(fid))}` +
+      `&mode=${encodeURIComponent(mode)}` +
       `&minScore=${encodeURIComponent(minScore)}` +
       `&limitEach=${encodeURIComponent(limitEach)}` +
       `&maxEach=${encodeURIComponent(maxEach)}` +
@@ -113,301 +144,324 @@ export async function GET(req: Request) {
       `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
       `&hubDelayMs=${encodeURIComponent(hubDelayMs)}`;
 
-    const res = await fetch(networkUrl, { cache: "no-store" });
-    const text = await res.text();
-    let json: any = null;
+    const netRes = await fetch(networkUrl, { cache: "no-store" });
+    const netText = await netRes.text();
+
+    let netJson: any = null;
     try {
-      json = text ? JSON.parse(text) : null;
+      netJson = netText ? JSON.parse(netText) : null;
     } catch {
-      json = null;
+      netJson = null;
     }
 
-    if (!res.ok || !json) {
+    if (!netRes.ok || !netJson) {
       return NextResponse.json(
-        { error: `network fetch failed (${res.status})`, detail: text?.slice?.(0, 400) },
+        {
+          error: "Failed to fetch network for image",
+          detail: netJson?.error || netText?.slice(0, 300) || `status ${netRes.status}`,
+        },
         { status: 500 }
       );
     }
 
-    const data = json as NetworkResp;
+    const net = netJson as NetworkResponse;
+    const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    const points = Array.isArray(data.points) ? data.points : [];
-    const ordered = [...points].sort((a, b) => a.count - b.count); // big last -> top
+    // Determine username for watermark: try to find the current user in any pin users list
+    let username = "";
+    for (const p of pointsRaw) {
+      const u = (p.users || []).find((x) => x?.fid === fid);
+      if (u?.username) {
+        username = u.username;
+        break;
+      }
+    }
+    if (!username) username = "user";
 
-    const totalPins = ordered.length;
-    const totalUsers = ordered.reduce((acc, p) => acc + (p.users?.length || 0), 0);
+    // Sort points so higher counts are rendered last (on top)
+    const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
-    const buckets = legendBuckets(ordered);
+    // Legend stats
+    const legend = {
+      b1: 0,
+      b2: 0,
+      b4: 0,
+      b8: 0,
+      pins: pointsRaw.length,
+      users: pointsRaw.reduce((acc, p) => acc + (p.users?.length || 0), 0),
+    };
 
-    const viewerName =
-      data.viewer?.display_name ||
-      data.viewer?.username ||
-      `FID ${fid}`;
+    for (const p of pointsRaw) {
+      const k = bucketKey(p.count || 0) as keyof typeof legend;
+      if (k === "b1" || k === "b2" || k === "b4" || k === "b8") legend[k] += 1;
+    }
 
-    const safeName = escapeHtml(viewerName);
+    const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
+    // Build HTML that renders a FULL-CARD map (no centered square)
     const html = `<!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=${w}, height=${h}, initial-scale=1" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>
-      html, body { margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden; background:#cdb7ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    :root{
+      --purple:#cdb7ff;
+      --card: rgba(255,255,255,0.35);
+      --ink: rgba(0,0,0,0.75);
+    }
+    html, body {
+      margin:0;
+      padding:0;
+      width:${w}px;
+      height:${h}px;
+      background: var(--purple);
+      overflow:hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    }
 
-      /* Fill the whole image with the map inside a rounded card */
-      #frame {
-        position: relative;
-        width: ${w}px;
-        height: ${h}px;
-        background: #cdb7ff;
-        padding: 14px;
-        box-sizing: border-box;
-      }
+    /* Outer purple background */
+    #frame{
+      position:relative;
+      width:100%;
+      height:100%;
+      background: var(--purple);
+      padding: 14px;
+      box-sizing: border-box;
+    }
 
-      #card {
-        position: relative;
-        width: 100%;
-        height: 100%;
-        background: rgba(255,255,255,0.35);
-        box-shadow: 0 18px 60px rgba(0,0,0,0.25);
-        border-radius: 26px;
-        padding: 14px;
-        box-sizing: border-box;
-      }
+    /* Full card fills frame */
+    #card{
+      position:relative;
+      width:100%;
+      height:100%;
+      border-radius: 28px;
+      background: var(--card);
+      box-shadow: 0 18px 60px rgba(0,0,0,0.22);
+      overflow:hidden;
+    }
 
-      /* MAP should fill card interior */
-      #mapWrap {
-        position: relative;
-        width: 100%;
-        height: 100%;
-        border-radius: 20px;
-        overflow: hidden;
-        background: rgba(0,0,0,0.12);
-      }
+    /* Inner map window fills the whole card (THIS IS THE KEY FIX) */
+    #mapWrap{
+      position:absolute;
+      inset: 14px;          /* small inset so rounded edges show */
+      border-radius: 22px;
+      overflow:hidden;
+      background: rgba(0,0,0,0.10);
+    }
 
-      #map {
-        position:absolute;
-        inset:0;
-      }
+    #map{
+      width:100%;
+      height:100%;
+    }
 
-      /* subtle vignette */
-      #vignette {
-        pointer-events:none;
-        position:absolute;
-        inset: 0;
-        border-radius: 20px;
-        box-shadow: inset 0 0 0 1px rgba(0,0,0,0.10), inset 0 0 60px rgba(0,0,0,0.12);
-        z-index: 5;
-      }
+    /* Overlays sit ON TOP of the map */
+    .overlay{
+      position:absolute;
+      z-index:9999;
+      display:flex;
+      gap:10px;
+      pointer-events:none;
+    }
 
-      /* Bottom overlay INSIDE map */
-      #bottomOverlay {
-        position: absolute;
-        left: 14px;
-        right: 14px;
-        bottom: 14px;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-        gap: 12px;
-        pointer-events: none;
-        z-index: 10;
-      }
+    #legend{
+      left: 26px;
+      bottom: 26px;
+      background: rgba(0,0,0,0.62);
+      color: white;
+      border-radius: 16px;
+      padding: 12px 12px 10px 12px;
+      width: 300px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+      pointer-events:none;
+    }
 
-      .pill {
-        background: rgba(0,0,0,0.70);
-        color: white;
-        padding: 8px 12px;
-        border-radius: 999px;
-        font-size: 13px;
-        font-weight: 800;
-        letter-spacing: 0.2px;
-        box-shadow: 0 10px 28px rgba(0,0,0,0.25);
-        max-width: 60%;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
+    #legendTitle{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      font-weight:800;
+      font-size:14px;
+      margin-bottom:8px;
+    }
 
-      .legend {
-        width: 270px;
-        background: rgba(0,0,0,0.60);
-        color: white;
-        border-radius: 16px;
-        padding: 10px 12px;
-        box-shadow: 0 10px 28px rgba(0,0,0,0.25);
-      }
+    .row{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      font-size:13px;
+      padding: 5px 0;
+      border-top: 1px solid rgba(255,255,255,0.10);
+    }
+    .row:first-of-type{ border-top:none; }
+    .left{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      opacity:0.95;
+    }
+    .dot{
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.35);
+    }
 
-      .legendTitle {
-        font-weight: 900;
-        font-size: 12px;
-        opacity: 0.95;
-        display:flex;
-        justify-content: space-between;
-        align-items: baseline;
-      }
+    #watermark{
+      right: 26px;
+      bottom: 26px;
+      background: rgba(0,0,0,0.62);
+      color: white;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-weight: 800;
+      font-size: 14px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+    }
 
-      .legendRow {
-        margin-top: 8px;
-        display:flex;
-        justify-content: space-between;
-        align-items:center;
-        font-size: 12px;
-        opacity: 0.95;
-      }
+    /* Make leaflet look cleaner */
+    .leaflet-control-container { display:none; }
+    .leaflet-tile { filter: saturate(1.05) contrast(1.03); }
+  </style>
+</head>
+<body>
+  <div id="frame">
+    <div id="card">
+      <div id="mapWrap"><div id="map"></div></div>
 
-      .left {
-        display:flex;
-        align-items:center;
-        gap: 8px;
-      }
-
-      .dot {
-        width: 14px;
-        height: 14px;
-        border-radius: 999px;
-        border: 2px solid rgba(0,0,0,0.55);
-        box-sizing: border-box;
-      }
-
-      .muted { opacity: 0.85; font-weight: 700; }
-    </style>
-  </head>
-  <body>
-    <div id="frame">
-      <div id="card">
-        <div id="mapWrap">
-          <div id="map"></div>
-
-          <div id="vignette"></div>
-
-          <div id="bottomOverlay">
-            <!-- legend bottom-left -->
-            <div class="legend">
-              <div class="legendTitle">
-                <span>Legend</span>
-                <span class="muted">${totalPins} pins • ${totalUsers} users</span>
-              </div>
-
-              <div class="legendRow">
-                <div class="left">
-                  <span class="dot" style="background:#84CC16;"></span>
-                  <span>1 user</span>
-                </div>
-                <span class="muted">${buckets.one} pins</span>
-              </div>
-
-              <div class="legendRow">
-                <div class="left">
-                  <span class="dot" style="background:#F59E0B;"></span>
-                  <span>2–3 users</span>
-                </div>
-                <span class="muted">${buckets.twoThree} pins</span>
-              </div>
-
-              <div class="legendRow">
-                <div class="left">
-                  <span class="dot" style="background:#06B6D4;"></span>
-                  <span>4–7 users</span>
-                </div>
-                <span class="muted">${buckets.fourSeven} pins</span>
-              </div>
-
-              <div class="legendRow">
-                <div class="left">
-                  <span class="dot" style="background:#7C3AED;"></span>
-                  <span>8+ users</span>
-                </div>
-                <span class="muted">${buckets.eightPlus} pins</span>
-              </div>
-            </div>
-
-            <!-- watermark bottom-right -->
-            <div class="pill">Far Maps • ${safeName}</div>
+      <div id="legend" class="overlay">
+        <div style="width:100%">
+          <div id="legendTitle">
+            <div>Legend</div>
+            <div style="opacity:0.9;font-weight:700">${legend.pins} pins • ${legend.users} users</div>
+          </div>
+          <div class="row">
+            <div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div>
+            <div style="font-weight:800">${legend.b1} pins</div>
+          </div>
+          <div class="row">
+            <div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div>
+            <div style="font-weight:800">${legend.b2} pins</div>
+          </div>
+          <div class="row">
+            <div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div>
+            <div style="font-weight:800">${legend.b4} pins</div>
+          </div>
+          <div class="row">
+            <div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div>
+            <div style="font-weight:800">${legend.b8} pins</div>
           </div>
         </div>
       </div>
+
+      <div id="watermark" class="overlay">Far Maps • ${String(username).replace(/</g, "&lt;")}</div>
     </div>
+  </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script>
-      const points = ${JSON.stringify(ordered)};
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const points = ${JSON.stringify(
+      points.map((p) => ({
+        lat: p.lat,
+        lng: p.lng,
+        count: p.count || 1,
+      }))
+    )};
 
-      const WORLD_BOUNDS = L.latLngBounds(
-        L.latLng(-85, -180),
-        L.latLng(85, 180)
-      );
+    const bounds = ${JSON.stringify(bounds)};
 
-      function markerStyle(count) {
-        if (count >= 8) return { r: 6, fill: "#7C3AED" };
-        if (count >= 4) return { r: 5, fill: "#06B6D4" };
-        if (count >= 2) return { r: 4, fill: "#F59E0B" };
-        return { r: 3, fill: "#84CC16" };
-      }
+    function bucketKey(count){
+      if (count >= 8) return "b8";
+      if (count >= 4) return "b4";
+      if (count >= 2) return "b2";
+      return "b1";
+    }
 
-      const map = L.map("map", {
-        zoomControl: false,
-        attributionControl: false,
-        worldCopyJump: false,
-        maxBounds: WORLD_BOUNDS,
-        maxBoundsViscosity: 1.0
-      });
+    const colors = {
+      b1: "${bucketColor("b1")}",
+      b2: "${bucketColor("b2")}",
+      b4: "${bucketColor("b4")}",
+      b8: "${bucketColor("b8")}",
+    };
 
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        noWrap: true,
-        bounds: WORLD_BOUNDS
+    // Slightly smaller pins than before
+    function radiusFor(count){
+      // base small, grows gently
+      if (count >= 8) return 7;
+      if (count >= 4) return 6;
+      if (count >= 2) return 5;
+      return 4;
+    }
+
+    const map = L.map("map", {
+      zoomControl:false,
+      attributionControl:false,
+      worldCopyJump:true,
+      preferCanvas:true,
+    });
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 8,
+      minZoom: 1,
+    }).addTo(map);
+
+    if (!points.length) {
+      map.setView([20,0], 2);
+    } else if (bounds && bounds.sw && bounds.ne) {
+      const b = L.latLngBounds(bounds.sw, bounds.ne);
+      // Padding matches your Share view logic (30)
+      map.fitBounds(b, { padding:[30,30] });
+    } else {
+      map.setView([20,0], 2);
+    }
+
+    // Render in ascending count order already, so bigger ones appear later (on top)
+    for (const p of points) {
+      const k = bucketKey(p.count);
+      const color = colors[k] || colors.b1;
+      const r = radiusFor(p.count);
+
+      L.circleMarker([p.lat, p.lng], {
+        radius: r,
+        weight: 2,
+        color: "rgba(0,0,0,0.55)",
+        fillColor: color,
+        fillOpacity: 0.95,
       }).addTo(map);
+    }
 
-      // same bounds logic as share view
-      if (!points.length) {
-        map.setView([20, 0], 2);
-      } else if (points.length === 1) {
-        map.setView([points[0].lat, points[0].lng], 4);
-      } else {
-        const b = L.latLngBounds(points.map(p => [p.lat, p.lng]));
-        map.fitBounds(b, { padding: [30, 30] });
-      }
-
-      // markers (small first, big last)
-      for (const p of points) {
-        const s = markerStyle(p.count);
-        L.circleMarker([p.lat, p.lng], {
-          radius: s.r,
-          color: "rgba(0,0,0,0.55)",
-          weight: 1.25,
-          fillColor: s.fill,
-          fillOpacity: 0.95
-        }).addTo(map);
-      }
-    </script>
-  </body>
+    // Signal to puppeteer
+    window.__MAP_READY__ = true;
+  </script>
+</body>
 </html>`;
 
+    // Puppeteer + Chromium (Vercel)
     const executablePath = await chromium.executablePath();
 
     const browser = await puppeteer.launch({
       args: chromium.args,
+      defaultViewport: { width: w, height: h },
       executablePath,
       headless: true,
     });
 
     try {
       const page = await browser.newPage();
-      await page.setViewport({ width: w, height: h, deviceScaleFactor: 2 });
+      await page.setContent(html, { waitUntil: "networkidle0" });
 
-      await page.setContent(html, { waitUntil: "networkidle2" });
-
-      // Give tiles a moment to settle
-      await new Promise((r) => setTimeout(r, 900));
+      // wait until leaflet has rendered markers
+      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 15_000 });
+      await new Promise((r) => setTimeout(r, 250)); // tiny settle
 
       const png = await page.screenshot({ type: "png" });
 
       return new NextResponse(png as any, {
         status: 200,
         headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "no-store, max-age=0",
+          "content-type": "image/png",
+          "cache-control": "no-store",
         },
       });
     } finally {
@@ -416,7 +470,7 @@ export async function GET(req: Request) {
   } catch (e: any) {
     console.error("api/map-image error:", e);
     return NextResponse.json(
-      { error: e?.message || "Server error", detail: String(e?.stack || "")?.slice?.(0, 1200) },
+      { error: e?.message || "Server error", detail: String(e?.stack || "")?.slice(0, 2000) },
       { status: 500 }
     );
   }
