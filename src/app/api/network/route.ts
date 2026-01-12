@@ -1,4 +1,3 @@
-// src/app/api/network/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -87,15 +86,24 @@ function roundCoord(n: number, decimals = 2) {
    In-memory caches (best effort; persists per warm instance)
    ────────────────────────────────────────────────────────────── */
 
-type CachedUser = { user: NeynarBulkResp["users"][number]; ts: number };
-type CachedNetwork = { followers: number[]; following: number[]; ts: number };
+type CachedUser = {
+  user: NeynarBulkResp["users"][number];
+  ts: number; // cached at
+};
 
+type CachedNetwork = {
+  followers: number[];
+  following: number[];
+  ts: number;
+};
+
+// Make caches survive hot reloads/dev and share across requests in same process
 const g = globalThis as any;
 
 const USER_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const NETWORK_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
-const MAX_USER_CACHE = 50_000;
+const MAX_USER_CACHE = 50_000; // adjust if needed
 const MAX_NETWORK_CACHE = 2_000;
 
 if (!g.__FARMAPS_USER_CACHE__) g.__FARMAPS_USER_CACHE__ = new Map<number, CachedUser>();
@@ -108,16 +116,26 @@ function isFresh(ts: number, ttl: number) {
   return Date.now() - ts <= ttl;
 }
 
+// Very simple pruning to keep memory bounded
 function pruneCache<K, V extends { ts: number }>(m: Map<K, V>, maxSize: number) {
   if (m.size <= maxSize) return;
   const target = Math.max(1, Math.floor(maxSize * 0.1));
   const entries = Array.from(m.entries());
   entries.sort((a, b) => a[1].ts - b[1].ts);
-  for (let i = 0; i < Math.min(target, entries.length); i++) m.delete(entries[i][0]);
+  for (let i = 0; i < Math.min(target, entries.length); i++) {
+    m.delete(entries[i][0]);
+  }
 }
 
-function getNetworkCacheKey(args: { fid: number; mode: Mode; limitEachRaw: string; maxEach: number }) {
-  return `${args.fid}|${args.mode}|limitEach=${args.limitEachRaw}|maxEach=${args.maxEach}`;
+function getNetworkCacheKey(args: {
+  fid: number;
+  mode: Mode;
+  limitEachRaw: string;
+  maxEach: number;
+  hubPageSize: number;
+  hubDelayMs: number;
+}) {
+  return `${args.fid}|${args.mode}|limitEach=${args.limitEachRaw}|maxEach=${args.maxEach}|pageSize=${args.hubPageSize}|delay=${args.hubDelayMs}`;
 }
 
 async function neynarUserBulk(fids: number[]): Promise<NeynarBulkResp> {
@@ -174,7 +192,9 @@ async function neynarBulkWithRetry(fids: number[], maxAttempts = 5) {
       const status = e?.status;
       const msg = e?.message || "";
       const retryable =
-        status === 429 || (typeof status === "number" && status >= 500) || msg.includes("(timeout)");
+        status === 429 ||
+        (typeof status === "number" && status >= 500) ||
+        msg.includes("(timeout)");
 
       if (!retryable || attempt >= maxAttempts) throw e;
 
@@ -185,7 +205,11 @@ async function neynarBulkWithRetry(fids: number[], maxAttempts = 5) {
   }
 }
 
-async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T, index: number) => Promise<R>) {
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let i = 0;
 
@@ -204,10 +228,16 @@ async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T, inde
 async function hydrateUsersCached(
   fids: number[],
   concurrency: number
-): Promise<{ users: NeynarBulkResp["users"]; cacheHits: number; fetchedCount: number; requested: number }> {
+): Promise<{
+  users: NeynarBulkResp["users"];
+  cacheHits: number;
+  fetchedCount: number;
+  requested: number;
+}> {
   const now = Date.now();
   const freshUsers: NeynarBulkResp["users"] = [];
   const missing: number[] = [];
+
   let cacheHits = 0;
 
   for (const fid of fids) {
@@ -234,7 +264,9 @@ async function hydrateUsersCached(
     }
 
     for (const u of fetchedUsers) {
-      if (typeof u?.fid === "number") userCache.set(u.fid, { user: u, ts: now });
+      if (typeof u?.fid === "number") {
+        userCache.set(u.fid, { user: u, ts: now });
+      }
     }
 
     pruneCache(userCache, MAX_USER_CACHE);
@@ -244,7 +276,12 @@ async function hydrateUsersCached(
   for (const u of freshUsers) byFid.set(u.fid, u);
   for (const u of fetchedUsers) byFid.set(u.fid, u);
 
-  return { users: Array.from(byFid.values()), cacheHits, fetchedCount: fetchedUsers.length, requested: fids.length };
+  return {
+    users: Array.from(byFid.values()),
+    cacheHits,
+    fetchedCount: fetchedUsers.length,
+    requested: fids.length,
+  };
 }
 
 export async function GET(req: Request) {
@@ -265,29 +302,27 @@ export async function GET(req: Request) {
     const limitEachRaw = searchParams.get("limitEach") || "200";
     const limitEach = limitEachRaw === "all" ? ("all" as const) : Number(limitEachRaw);
 
-    const maxEachParam = Number(searchParams.get("maxEach") || "5000");
+    const maxEachParam = Number(searchParams.get("maxEach") || "20000");
     const maxEach = Number.isFinite(maxEachParam)
-      ? Math.min(Math.max(maxEachParam, 200), 100000)
-      : 5000;
+      ? Math.min(Math.max(maxEachParam, 1000), 100000)
+      : 20000;
 
     const minScoreParam = Number(searchParams.get("minScore") || "0.8");
     const minScore = Number.isFinite(minScoreParam) ? minScoreParam : 0.8;
 
     const concurrencyParam = Number(searchParams.get("concurrency") || "4");
-    const concurrency = Number.isFinite(concurrencyParam) ? Math.min(Math.max(concurrencyParam, 1), 8) : 4;
+    const concurrency = Number.isFinite(concurrencyParam)
+      ? Math.min(Math.max(concurrencyParam, 1), 8)
+      : 4;
 
-    // Hub pacing knobs (important for Pinata hub)
-    const hubPageSizeParam = Number(searchParams.get("hubPageSize") || "50");
-    const hubPageSize = Number.isFinite(hubPageSizeParam) ? Math.min(Math.max(hubPageSizeParam, 10), 100) : 50;
-
-    const hubDelayMsParam = Number(searchParams.get("hubDelayMs") || "125");
-    const hubDelayMs = Number.isFinite(hubDelayMsParam) ? Math.min(Math.max(hubDelayMsParam, 0), 2000) : 125;
+    // Hub pacing passthrough (used inside lib/hub if you add it there later)
+    const hubPageSize = Math.min(Math.max(Number(searchParams.get("hubPageSize") || "50"), 10), 200);
+    const hubDelayMs = Math.min(Math.max(Number(searchParams.get("hubDelayMs") || "150"), 0), 2000);
 
     const includeFollowers = mode === "followers" || mode === "both";
     const includeFollowing = mode === "following" || mode === "both";
 
-    // 1) Hub: cache follower/following fid lists
-    const cacheKey = getNetworkCacheKey({ fid, mode, limitEachRaw, maxEach });
+    const cacheKey = getNetworkCacheKey({ fid, mode, limitEachRaw, maxEach, hubPageSize, hubDelayMs });
     const cachedNet = networkCache.get(cacheKey);
 
     let followers: number[] = [];
@@ -304,9 +339,9 @@ export async function GET(req: Request) {
         includeFollowing,
         limitEach: limitEach as any,
         maxEach,
-        pageSize: hubPageSize,
-        pageDelayMs: hubDelayMs,
-        maxPages: 500, // extra safety
+        // (optional) if you later add these into lib/hub:
+        // hubPageSize,
+        // hubDelayMs,
       });
 
       followers = net.followers;
@@ -318,11 +353,20 @@ export async function GET(req: Request) {
 
     const merged = Array.from(new Set([fid, ...followers, ...following]));
 
-    // 2) Neynar: hydrate (cached)
     const hydrate = await hydrateUsersCached(merged, concurrency);
     const allUsers = hydrate.users;
 
-    // 3) Filter + group
+    // viewer info for watermarking
+    const viewerUser = allUsers.find((u) => u.fid === fid);
+    const viewer = viewerUser
+      ? {
+          fid,
+          username: viewerUser.username,
+          display_name: viewerUser.display_name,
+          pfp_url: viewerUser.pfp_url,
+        }
+      : { fid };
+
     let scoredOk = 0;
     let missingScore = 0;
     let withLocation = 0;
@@ -341,6 +385,7 @@ export async function GET(req: Request) {
       const lat0 = u.profile?.location?.latitude;
       const lng0 = u.profile?.location?.longitude;
       if (typeof lat0 !== "number" || typeof lng0 !== "number") continue;
+
       if (!Number.isFinite(lat0) || !Number.isFinite(lng0)) continue;
       if (lat0 < -90 || lat0 > 90 || lng0 < -180 || lng0 > 180) continue;
 
@@ -362,7 +407,13 @@ export async function GET(req: Request) {
 
       const existing = grouped.get(key);
       if (!existing) {
-        grouped.set(key, { lat, lng, city, count: 1, users: [user] });
+        grouped.set(key, {
+          lat,
+          lng,
+          city,
+          count: 1,
+          users: [user],
+        });
       } else {
         existing.count += 1;
         existing.users.push(user);
@@ -382,7 +433,10 @@ export async function GET(req: Request) {
       limitEach: limitEachRaw,
       maxEach,
       concurrency,
-      hub: { pageSize: hubPageSize, delayMs: hubDelayMs },
+      hubPageSize,
+      hubDelayMs,
+
+      viewer,
 
       followersCount: followers.length,
       followingCount: following.length,
@@ -393,7 +447,11 @@ export async function GET(req: Request) {
       count: points.length,
 
       cache: {
-        network: { hit: networkCacheHit, ttlMs: NETWORK_TTL_MS, size: networkCache.size },
+        network: {
+          hit: networkCacheHit,
+          ttlMs: NETWORK_TTL_MS,
+          size: networkCache.size,
+        },
         users: {
           requested: hydrate.requested,
           cacheHits: hydrate.cacheHits,
