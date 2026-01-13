@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
+import { createRequire } from "module";
 
 type Mode = "followers" | "following" | "both";
 
@@ -23,6 +24,8 @@ type NetworkResponse = {
     }>;
   }>;
 };
+
+const require = createRequire(import.meta.url);
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, n));
@@ -71,6 +74,7 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   if (minLat > maxLat || minLng > maxLng) return null;
 
+  // Expand if single coordinate so fitBounds works
   if (minLat === maxLat) {
     minLat = clamp(minLat - 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
     maxLat = clamp(maxLat + 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
@@ -104,7 +108,7 @@ function escHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function safeUrl(s: string) {
+function safeHttpsUrl(s: string) {
   try {
     const u = new URL(s);
     if (u.protocol !== "https:") return "";
@@ -139,6 +143,7 @@ export async function GET(req: Request) {
     const w = clamp(parseNum(sp, "w", 1000), 600, 2000);
     const h = clamp(parseNum(sp, "h", 1000), 600, 2000);
 
+    // Fetch your own /api/network
     const base =
       process.env.NEXT_PUBLIC_URL && process.env.NEXT_PUBLIC_URL.startsWith("http")
         ? process.env.NEXT_PUBLIC_URL.replace(/\/+$/, "")
@@ -178,7 +183,7 @@ export async function GET(req: Request) {
     const net = netJson as NetworkResponse;
     const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    // viewer username + pfp
+    // username + pfp for overlays
     let username = "user";
     let pfpUrl = "";
     for (const p of pointsRaw) {
@@ -189,11 +194,12 @@ export async function GET(req: Request) {
         break;
       }
     }
-    const pfpSafe = safeUrl(pfpUrl);
+    const pfpSafe = safeHttpsUrl(pfpUrl);
 
-    // draw small first, big last
+    // Sort so bigger pins render on top
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
+    // Legend
     const legend = {
       b1: 0,
       b2: 0,
@@ -202,7 +208,6 @@ export async function GET(req: Request) {
       pins: pointsRaw.length,
       users: pointsRaw.reduce((acc, p) => acc + (p.users?.length || 0), 0),
     };
-
     for (const p of pointsRaw) {
       const k = bucketKey(p.count || 0) as keyof typeof legend;
       if (k === "b1" || k === "b2" || k === "b4" || k === "b8") legend[k] += 1;
@@ -210,22 +215,21 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
+    // Detect “world-ish” bounds (to avoid ultra-zoomed-out / duplicated world look)
     const worldish =
       !!bounds &&
-      typeof (bounds as any)?.sw?.[0] === "number" &&
-      typeof (bounds as any)?.ne?.[0] === "number" &&
       typeof (bounds as any)?.sw?.[1] === "number" &&
       typeof (bounds as any)?.ne?.[1] === "number" &&
       Math.abs((bounds as any).ne[1] - (bounds as any).sw[1]) > 300;
 
     const MIN_ZOOM_WORLD = 2;
 
+    // IMPORTANT: no external Leaflet includes here.
     const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
     :root{
       --purple:#cdb7ff;
@@ -257,19 +261,17 @@ export async function GET(req: Request) {
       box-shadow: 0 18px 60px rgba(0,0,0,0.22);
       overflow:hidden;
     }
+
+    /* Map fills the FULL card space */
     #map{
       position:absolute;
       inset:0;
       width:100%;
       height:100%;
-      background: transparent;
+      background: rgba(0,0,0,0.05);
     }
 
-    .overlay{
-      position:absolute;
-      z-index:9999;
-      pointer-events:none;
-    }
+    .overlay{ position:absolute; z-index:9999; pointer-events:none; }
 
     #legend{
       left: 18px;
@@ -281,7 +283,6 @@ export async function GET(req: Request) {
       width: 320px;
       box-shadow: 0 12px 40px rgba(0,0,0,0.22);
     }
-
     #legendTitle{
       display:flex;
       justify-content:space-between;
@@ -290,7 +291,6 @@ export async function GET(req: Request) {
       font-size:14px;
       margin-bottom:8px;
     }
-
     .row{
       display:flex;
       justify-content:space-between;
@@ -364,9 +364,10 @@ export async function GET(req: Request) {
       opacity:0.95;
     }
 
+    /* Leaflet cleanup */
     .leaflet-control-container { display:none; }
-    .leaflet-tile { filter: saturate(1.05) contrast(1.03); }
     .leaflet-container { background: transparent; }
+    .leaflet-tile { filter: saturate(1.05) contrast(1.03); }
   </style>
 </head>
 <body>
@@ -411,7 +412,6 @@ export async function GET(req: Request) {
     </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     window.__MAP_READY__ = false;
 
@@ -426,11 +426,6 @@ export async function GET(req: Request) {
     const bounds = ${JSON.stringify(bounds)};
     const WORLDISH = ${JSON.stringify(worldish)};
     const MIN_ZOOM_WORLD = ${JSON.stringify(MIN_ZOOM_WORLD)};
-
-    const WORLD_BOUNDS = L.latLngBounds(
-      L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
-      L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
-    );
 
     function bucketKey(count){
       if (count >= 8) return "b8";
@@ -453,92 +448,90 @@ export async function GET(req: Request) {
       return 4;
     }
 
-    const map = L.map("map", {
-      zoomControl:false,
-      attributionControl:false,
-      worldCopyJump:false,
-      preferCanvas:true,
-      maxBounds: WORLD_BOUNDS,
-      maxBoundsViscosity: 1.0,
-    });
+    function initLeaflet(){
+      try{
+        if (!window.L) throw new Error("Leaflet not loaded");
 
-    // Don’t block readiness on tiles
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 8,
-      minZoom: 1,
-      noWrap: true,
-      bounds: WORLD_BOUNDS,
-    }).addTo(map);
+        const WORLD_BOUNDS = L.latLngBounds(
+          L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
+          L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
+        );
 
-    function applyView() {
-      if (!points.length) {
-        map.setView([20,0], 2);
-        return;
-      }
+        const map = L.map("map", {
+          zoomControl:false,
+          attributionControl:false,
+          worldCopyJump:false,
+          preferCanvas:true,
+          maxBounds: WORLD_BOUNDS,
+          maxBoundsViscosity: 1.0,
+        });
 
-      if (bounds && bounds.sw && bounds.ne) {
-        const b = L.latLngBounds(bounds.sw, bounds.ne);
-        map.fitBounds(b, { padding:[10,10] });
-
-        const z = map.getZoom();
-        if (WORLDISH && z < MIN_ZOOM_WORLD) {
-          map.setZoom(MIN_ZOOM_WORLD);
-        }
-        return;
-      }
-
-      map.setView([20,0], 2);
-    }
-
-    function drawMarkers() {
-      for (const p of points) {
-        const k = bucketKey(p.count);
-        const color = colors[k] || colors.b1;
-        const r = radiusFor(p.count);
-
-        L.circleMarker([p.lat, p.lng], {
-          radius: r,
-          weight: 2,
-          color: "rgba(0,0,0,0.55)",
-          fillColor: color,
-          fillOpacity: 0.95,
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 8,
+          minZoom: 1,
+          noWrap: true,
+          bounds: WORLD_BOUNDS,
         }).addTo(map);
-      }
-    }
 
-    map.whenReady(() => {
-      try {
-        applyView();
+        function applyView() {
+          if (!points.length) {
+            map.setView([20,0], 2);
+            return;
+          }
+          if (bounds && bounds.sw && bounds.ne) {
+            const b = L.latLngBounds(bounds.sw, bounds.ne);
+            map.fitBounds(b, { padding:[10,10] });
+            const z = map.getZoom();
+            if (WORLDISH && z < MIN_ZOOM_WORLD) map.setZoom(MIN_ZOOM_WORLD);
+            return;
+          }
+          map.setView([20,0], 2);
+        }
 
-        // Force layout in headless
-        requestAnimationFrame(() => {
-          map.invalidateSize(true);
+        map.whenReady(() => {
+          applyView();
+
+          // force layout in headless
           requestAnimationFrame(() => {
             map.invalidateSize(true);
+            requestAnimationFrame(() => {
+              map.invalidateSize(true);
 
-            drawMarkers();
+              // draw markers
+              for (const p of points) {
+                const k = bucketKey(p.count);
+                const color = colors[k] || colors.b1;
+                const r = radiusFor(p.count);
 
-            // Always resolve readiness after a short settle,
-            // even if tiles are slow/rate-limited.
-            setTimeout(() => {
-              window.__MAP_READY__ = true;
-            }, 900);
+                L.circleMarker([p.lat, p.lng], {
+                  radius: r,
+                  weight: 2,
+                  color: "rgba(0,0,0,0.55)",
+                  fillColor: color,
+                  fillOpacity: 0.95,
+                }).addTo(map);
+              }
+
+              // settle then ready
+              setTimeout(() => { window.__MAP_READY__ = true; }, 900);
+            });
           });
         });
+
+        // never hang
+        setTimeout(() => { window.__MAP_READY__ = true; }, 6000);
       } catch (e) {
-        // Never hang the screenshot
         window.__MAP_READY__ = true;
       }
-    });
+    }
 
-    // Absolute safety: never hang
-    setTimeout(() => { window.__MAP_READY__ = true; }, 5000);
+    window.__INIT_LEAFLET__ = initLeaflet;
   </script>
 </body>
 </html>`;
 
+    // Puppeteer + Chromium
     const executablePath = await chromium.executablePath();
-
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: { width: w, height: h },
@@ -549,14 +542,27 @@ export async function GET(req: Request) {
     try {
       const page = await browser.newPage();
 
-      // Faster + more reliable than networkidle0 for tile-heavy pages
+      // Set HTML first (no external Leaflet)
       await page.setContent(html, { waitUntil: "domcontentloaded" });
 
-      // Wait for Leaflet to mount
+      // Inject Leaflet from local node_modules (reliable)
+      const leafletCssPath = require.resolve("leaflet/dist/leaflet.css");
+      const leafletJsPath = require.resolve("leaflet/dist/leaflet.js");
+
+      await page.addStyleTag({ path: leafletCssPath });
+      await page.addScriptTag({ path: leafletJsPath });
+
+      // Now run init inside the page
+      await page.evaluate(() => {
+        // @ts-ignore
+        window.__INIT_LEAFLET__?.();
+      });
+
+      // Leaflet should mount
       await page.waitForSelector(".leaflet-pane", { timeout: 15_000 });
 
-      // Wait for our ready flag (should always resolve now)
-      await page.waitForFunction(() => (window as any).__MAP_READY__ === true, { timeout: 20_000 });
+      // Wait until we're ready for screenshot
+      await page.waitForFunction(() => (window as any).__MAP_READY__ === true, { timeout: 25_000 });
 
       const png = await page.screenshot({ type: "png" });
 

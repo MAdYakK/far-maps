@@ -1,4 +1,3 @@
-// next.config.ts
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
@@ -8,10 +7,12 @@ const nextConfig: NextConfig = {
     "/api/map-image": [
       "./node_modules/@sparticuz/chromium/bin/**",
       "./node_modules/@sparticuz/chromium/build/**",
+      "./node_modules/leaflet/dist/**",
     ],
     "app/api/map-image": [
       "./node_modules/@sparticuz/chromium/bin/**",
       "./node_modules/@sparticuz/chromium/build/**",
+      "./node_modules/leaflet/dist/**",
     ],
   },
 };
