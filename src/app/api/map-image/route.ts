@@ -24,12 +24,6 @@ type NetworkResponse = {
   }>;
 };
 
-function mustEnv(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
-
 function clamp(n: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, n));
 }
@@ -43,6 +37,20 @@ function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
+// WebMercator practical lat bounds
+const WORLD_MIN_LAT = -85.0511;
+const WORLD_MAX_LAT = 85.0511;
+const WORLD_MIN_LNG = -180;
+const WORLD_MAX_LNG = 180;
+
+function normalizeLng(lng: number) {
+  // Force into [-180, 180] to avoid fitBounds selecting a wrapped world
+  let x = lng;
+  while (x > 180) x -= 360;
+  while (x < -180) x += 360;
+  return x;
+}
+
 function computeBounds(points: { lat: number; lng: number }[]) {
   if (!points.length) return null;
 
@@ -53,35 +61,32 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   for (const p of points) {
     if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
-    minLat = Math.min(minLat, p.lat);
-    maxLat = Math.max(maxLat, p.lat);
-    minLng = Math.min(minLng, p.lng);
-    maxLng = Math.max(maxLng, p.lng);
+
+    const lat = clamp(p.lat, WORLD_MIN_LAT, WORLD_MAX_LAT);
+    const lng = normalizeLng(p.lng);
+
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
   }
 
   if (minLat > maxLat || minLng > maxLng) return null;
 
   // If all points are the same coordinate, expand slightly so fitBounds works nicely
   if (minLat === maxLat) {
-    minLat -= 0.25;
-    maxLat += 0.25;
+    minLat = clamp(minLat - 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
+    maxLat = clamp(maxLat + 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
   }
   if (minLng === maxLng) {
-    minLng -= 0.25;
-    maxLng += 0.25;
+    minLng = clamp(minLng - 0.25, WORLD_MIN_LNG, WORLD_MAX_LNG);
+    maxLng = clamp(maxLng + 0.25, WORLD_MIN_LNG, WORLD_MAX_LNG);
   }
 
   return {
     sw: [round2(minLat), round2(minLng)],
     ne: [round2(maxLat), round2(maxLng)],
   };
-}
-
-function bucketLabel(count: number) {
-  if (count >= 8) return "8+ users";
-  if (count >= 4) return "4–7 users";
-  if (count >= 2) return "2–3 users";
-  return "1 user";
 }
 
 function bucketKey(count: number) {
@@ -93,11 +98,25 @@ function bucketKey(count: number) {
 
 function bucketColor(key: string) {
   // High contrast on OSM water/land
-  // b1 = lime, b2 = orange, b4 = cyan, b8 = purple
-  if (key === "b8") return "#6D28D9";
-  if (key === "b4") return "#06B6D4";
-  if (key === "b2") return "#F59E0B";
-  return "#84CC16";
+  if (key === "b8") return "#6D28D9"; // purple
+  if (key === "b4") return "#06B6D4"; // cyan
+  if (key === "b2") return "#F59E0B"; // amber
+  return "#84CC16"; // lime
+}
+
+function escHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function safeUrl(s: string) {
+  try {
+    const u = new URL(s);
+    // allow https only (avoid data:, javascript:, etc)
+    if (u.protocol !== "https:") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
 }
 
 export async function GET(req: Request) {
@@ -125,14 +144,12 @@ export async function GET(req: Request) {
     const w = clamp(parseNum(sp, "w", 1000), 600, 2000);
     const h = clamp(parseNum(sp, "h", 1000), 600, 2000);
 
-    // Pull username from network payload (we’ll use the first user that matches fid when possible)
+    // Use absolute base URL on server if available
     const base =
       process.env.NEXT_PUBLIC_URL && process.env.NEXT_PUBLIC_URL.startsWith("http")
         ? process.env.NEXT_PUBLIC_URL.replace(/\/+$/, "")
         : "";
 
-    // Use an internal fetch to your own /api/network endpoint
-    // NOTE: use absolute on server if possible, fallback to relative (Vercel should still work with absolute)
     const networkUrl =
       (base ? `${base}` : "") +
       `/api/network?fid=${encodeURIComponent(String(fid))}` +
@@ -167,18 +184,20 @@ export async function GET(req: Request) {
     const net = netJson as NetworkResponse;
     const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    // Determine username for watermark: try to find the current user in any pin users list
-    let username = "";
+    // Find viewer username + pfp from the network payload
+    let username = "user";
+    let pfpUrl = "";
     for (const p of pointsRaw) {
       const u = (p.users || []).find((x) => x?.fid === fid);
       if (u?.username) {
         username = u.username;
+        if (u?.pfp_url) pfpUrl = u.pfp_url;
         break;
       }
     }
-    if (!username) username = "user";
+    const pfpSafe = safeUrl(pfpUrl);
 
-    // Sort points so higher counts are rendered last (on top)
+    // Sort so higher counts render last (on top)
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
     // Legend stats
@@ -198,7 +217,11 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
-    // Build HTML that renders a FULL-CARD map (no centered square)
+    // IMPORTANT: stop world duplication:
+    // - tileLayer: noWrap: true
+    // - map: worldCopyJump: false
+    // - maxBounds set to one-world bounds
+    // - bounds normalized
     const html = `<!doctype html>
 <html>
 <head>
@@ -209,29 +232,28 @@ export async function GET(req: Request) {
     :root{
       --purple:#cdb7ff;
       --card: rgba(255,255,255,0.35);
-      --ink: rgba(0,0,0,0.75);
     }
     html, body {
       margin:0;
       padding:0;
       width:${w}px;
       height:${h}px;
-      background: var(--purple);
       overflow:hidden;
+      background: var(--purple);
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
     }
 
-    /* Outer purple background */
+    /* Purple frame */
     #frame{
       position:relative;
       width:100%;
       height:100%;
-      background: var(--purple);
       padding: 14px;
-      box-sizing: border-box;
+      box-sizing:border-box;
+      background: var(--purple);
     }
 
-    /* Full card fills frame */
+    /* Full-card */
     #card{
       position:relative;
       width:100%;
@@ -242,46 +264,37 @@ export async function GET(req: Request) {
       overflow:hidden;
     }
 
-    /* Inner map window fills the whole card (THIS IS THE KEY FIX) */
-    #mapWrap{
-      position:absolute;
-      inset: 14px;          /* small inset so rounded edges show */
-      border-radius: 22px;
-      overflow:hidden;
-      background: rgba(0,0,0,0.10);
-    }
-
+    /* Map fills entire card (no inset) */
     #map{
+      position:absolute;
+      inset:0;
       width:100%;
       height:100%;
     }
 
-    /* Overlays sit ON TOP of the map */
+    /* Overlays sit on top of map */
     .overlay{
       position:absolute;
       z-index:9999;
-      display:flex;
-      gap:10px;
       pointer-events:none;
     }
 
     #legend{
-      left: 26px;
-      bottom: 26px;
+      left: 18px;
+      bottom: 18px;
       background: rgba(0,0,0,0.62);
       color: white;
       border-radius: 16px;
       padding: 12px 12px 10px 12px;
-      width: 300px;
+      width: 320px;
       box-shadow: 0 12px 40px rgba(0,0,0,0.22);
-      pointer-events:none;
     }
 
     #legendTitle{
       display:flex;
       justify-content:space-between;
       align-items:center;
-      font-weight:800;
+      font-weight:900;
       font-size:14px;
       margin-bottom:8px;
     }
@@ -302,22 +315,62 @@ export async function GET(req: Request) {
       opacity:0.95;
     }
     .dot{
-      width: 12px;
-      height: 12px;
+      width: 11px;
+      height: 11px;
       border-radius: 999px;
       box-shadow: 0 0 0 2px rgba(0,0,0,0.35);
     }
 
     #watermark{
-      right: 26px;
-      bottom: 26px;
+      right: 18px;
+      bottom: 18px;
       background: rgba(0,0,0,0.62);
       color: white;
       border-radius: 999px;
       padding: 10px 14px;
-      font-weight: 800;
+      font-weight: 900;
       font-size: 14px;
       box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+    }
+
+    /* Top-right profile badge */
+    #pfp{
+      right: 18px;
+      top: 18px;
+      width: 120px;
+      height: 120px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.35);
+      box-shadow: 0 14px 50px rgba(0,0,0,0.25);
+      display: grid;
+      place-items: center;
+      overflow:hidden;
+    }
+    #pfpInner{
+      width: 112px;
+      height: 112px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.12);
+      overflow:hidden;
+      box-shadow: inset 0 0 0 3px rgba(255,255,255,0.20);
+      position:relative;
+    }
+    #pfpInner.hasImg{
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    #pfpFallback{
+      position:absolute;
+      inset:0;
+      display:grid;
+      place-items:center;
+      color:white;
+      font-weight:900;
+      font-size:34px;
+      letter-spacing: -0.5px;
+      text-transform: uppercase;
+      opacity:0.95;
     }
 
     /* Make leaflet look cleaner */
@@ -328,34 +381,42 @@ export async function GET(req: Request) {
 <body>
   <div id="frame">
     <div id="card">
-      <div id="mapWrap"><div id="map"></div></div>
+      <div id="map"></div>
 
       <div id="legend" class="overlay">
-        <div style="width:100%">
-          <div id="legendTitle">
-            <div>Legend</div>
-            <div style="opacity:0.9;font-weight:700">${legend.pins} pins • ${legend.users} users</div>
-          </div>
-          <div class="row">
-            <div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div>
-            <div style="font-weight:800">${legend.b1} pins</div>
-          </div>
-          <div class="row">
-            <div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div>
-            <div style="font-weight:800">${legend.b2} pins</div>
-          </div>
-          <div class="row">
-            <div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div>
-            <div style="font-weight:800">${legend.b4} pins</div>
-          </div>
-          <div class="row">
-            <div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div>
-            <div style="font-weight:800">${legend.b8} pins</div>
-          </div>
+        <div id="legendTitle">
+          <div>Legend</div>
+          <div style="opacity:0.9;font-weight:800">${legend.pins} pins • ${legend.users} users</div>
+        </div>
+        <div class="row">
+          <div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div>
+          <div style="font-weight:900">${legend.b1} pins</div>
+        </div>
+        <div class="row">
+          <div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div>
+          <div style="font-weight:900">${legend.b2} pins</div>
+        </div>
+        <div class="row">
+          <div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div>
+          <div style="font-weight:900">${legend.b4} pins</div>
+        </div>
+        <div class="row">
+          <div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div>
+          <div style="font-weight:900">${legend.b8} pins</div>
         </div>
       </div>
 
-      <div id="watermark" class="overlay">Far Maps • ${String(username).replace(/</g, "&lt;")}</div>
+      <div id="watermark" class="overlay">Far Maps • ${escHtml(String(username))}</div>
+
+      <div id="pfp" class="overlay" aria-hidden="true">
+        <div id="pfpInner" class="${pfpSafe ? "hasImg" : ""}" style="${
+      pfpSafe ? `background-image:url('${pfpSafe.replace(/'/g, "%27")}')` : ""
+    }">
+          <div id="pfpFallback" style="${pfpSafe ? "display:none" : ""}">
+            ${escHtml(String(username || "u").slice(0, 1))}
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -363,13 +424,18 @@ export async function GET(req: Request) {
   <script>
     const points = ${JSON.stringify(
       points.map((p) => ({
-        lat: p.lat,
-        lng: p.lng,
+        lat: clamp(Number(p.lat), WORLD_MIN_LAT, WORLD_MAX_LAT),
+        lng: normalizeLng(Number(p.lng)),
         count: p.count || 1,
       }))
     )};
 
     const bounds = ${JSON.stringify(bounds)};
+
+    const WORLD_BOUNDS = L.latLngBounds(
+      L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
+      L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
+    );
 
     function bucketKey(count){
       if (count >= 8) return "b8";
@@ -385,9 +451,8 @@ export async function GET(req: Request) {
       b8: "${bucketColor("b8")}",
     };
 
-    // Slightly smaller pins than before
+    // Smaller pins; bigger count slightly larger
     function radiusFor(count){
-      // base small, grows gently
       if (count >= 8) return 7;
       if (count >= 4) return 6;
       if (count >= 2) return 5;
@@ -397,47 +462,55 @@ export async function GET(req: Request) {
     const map = L.map("map", {
       zoomControl:false,
       attributionControl:false,
-      worldCopyJump:true,
+      worldCopyJump:false,        // ✅ STOP jumping/wrapping
       preferCanvas:true,
+      maxBounds: WORLD_BOUNDS,     // ✅ LOCK to one world
+      maxBoundsViscosity: 1.0,
     });
 
+    // ✅ noWrap prevents the "world repeats" tiles
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 8,
       minZoom: 1,
+      noWrap: true,
+      bounds: WORLD_BOUNDS,
     }).addTo(map);
 
+    // Set view/bounds
     if (!points.length) {
       map.setView([20,0], 2);
     } else if (bounds && bounds.sw && bounds.ne) {
       const b = L.latLngBounds(bounds.sw, bounds.ne);
-      // Padding matches your Share view logic (30)
       map.fitBounds(b, { padding:[30,30] });
     } else {
       map.setView([20,0], 2);
     }
 
-    // Render in ascending count order already, so bigger ones appear later (on top)
-    for (const p of points) {
-      const k = bucketKey(p.count);
-      const color = colors[k] || colors.b1;
-      const r = radiusFor(p.count);
+    // Ensure Leaflet measures correctly in headless
+    map.whenReady(() => {
+      map.invalidateSize(true);
+      // Render in ascending order so bigger ones are on top (already sorted server-side)
+      for (const p of points) {
+        const k = bucketKey(p.count);
+        const color = colors[k] || colors.b1;
+        const r = radiusFor(p.count);
 
-      L.circleMarker([p.lat, p.lng], {
-        radius: r,
-        weight: 2,
-        color: "rgba(0,0,0,0.55)",
-        fillColor: color,
-        fillOpacity: 0.95,
-      }).addTo(map);
-    }
+        L.circleMarker([p.lat, p.lng], {
+          radius: r,
+          weight: 2,
+          color: "rgba(0,0,0,0.55)",
+          fillColor: color,
+          fillOpacity: 0.95,
+        }).addTo(map);
+      }
 
-    // Signal to puppeteer
-    window.__MAP_READY__ = true;
+      // Signal to puppeteer (after markers added)
+      window.__MAP_READY__ = true;
+    });
   </script>
 </body>
 </html>`;
 
-    // Puppeteer + Chromium (Vercel)
     const executablePath = await chromium.executablePath();
 
     const browser = await puppeteer.launch({
@@ -451,9 +524,8 @@ export async function GET(req: Request) {
       const page = await browser.newPage();
       await page.setContent(html, { waitUntil: "networkidle0" });
 
-      // wait until leaflet has rendered markers
-      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 15_000 });
-      await new Promise((r) => setTimeout(r, 250)); // tiny settle
+      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 20_000 });
+      await new Promise((r) => setTimeout(r, 250)); // small settle
 
       const png = await page.screenshot({ type: "png" });
 

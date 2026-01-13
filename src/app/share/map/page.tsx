@@ -7,7 +7,6 @@ import { sdk } from "@farcaster/miniapp-sdk";
 type Mode = "followers" | "following" | "both";
 
 function getBaseUrl() {
-  // Prefer env on Vercel, fallback to window origin
   const env = process.env.NEXT_PUBLIC_URL;
   if (env && env.startsWith("http")) return env.replace(/\/+$/, "");
   if (typeof window !== "undefined") return window.location.origin;
@@ -31,13 +30,9 @@ export default function ShareMapPage() {
   const [imgErr, setImgErr] = useState<string>("");
   const [sharing, setSharing] = useState(false);
 
-  // loading overlay control
   const [loadingImg, setLoadingImg] = useState(true);
-
-  // bump this to force image reload
   const [reloadNonce, setReloadNonce] = useState<number>(() => Date.now());
 
-  // Pull params from query string; if missing fid, try sdk.context
   useEffect(() => {
     (async () => {
       const sp = new URLSearchParams(window.location.search);
@@ -59,13 +54,11 @@ export default function ShareMapPage() {
         return;
       }
 
-      // fallback: try context
       try {
         await sdk.actions.ready();
         const ctx = await sdk.context;
         const detectedFid =
-          ((ctx as any)?.viewer?.fid as number | undefined) ??
-          ((ctx as any)?.user?.fid as number | undefined);
+          ((ctx as any)?.viewer?.fid as number | undefined) ?? ((ctx as any)?.user?.fid as number | undefined);
         if (detectedFid) setFid(detectedFid);
       } catch {
         // ignore
@@ -73,7 +66,6 @@ export default function ShareMapPage() {
     })();
   }, []);
 
-  // ✅ Relative URL for rendering inside the app
   const imageSrc = useMemo(() => {
     if (!fid) return "";
     return (
@@ -87,11 +79,10 @@ export default function ShareMapPage() {
       `&hubPageSize=${encodeURIComponent(hubPageSize)}` +
       `&hubDelayMs=${encodeURIComponent(hubDelayMs)}` +
       `&w=1000&h=1000` +
-      `&v=${encodeURIComponent(String(reloadNonce))}` // cache-bust on reload
+      `&v=${encodeURIComponent(String(reloadNonce))}`
     );
   }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs, reloadNonce]);
 
-  // ✅ Absolute URL for embedding in cast
   const imageAbsolute = useMemo(() => {
     if (!fid) return "";
     const base = getBaseUrl();
@@ -116,7 +107,6 @@ export default function ShareMapPage() {
   }
 
   function reloadImage() {
-    // show spinner immediately and bust cache
     setLoadingImg(true);
     setImgOk(null);
     setImgErr("");
@@ -131,12 +121,12 @@ export default function ShareMapPage() {
         margin: 0,
         padding: 0,
         overflow: "hidden",
-        background: "#cdb7ff", // light purple
+        background: "#cdb7ff",
         display: "flex",
         flexDirection: "column",
       }}
     >
-      {/* Top bubble bar */}
+      {/* Top bar */}
       <div style={{ position: "relative", zIndex: 10, padding: 12 }}>
         <div
           style={{
@@ -160,13 +150,11 @@ export default function ShareMapPage() {
             {sharing ? "Sharing…" : "Share"}
           </BubbleButton>
 
-          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
-            {fid ? `FID ${fid} • ${mode}` : "Loading…"}
-          </div>
+          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{fid ? `FID ${fid} • ${mode}` : "Loading…"}</div>
         </div>
       </div>
 
-      {/* Image frame */}
+      {/* Image area */}
       <div
         style={{
           flex: 1,
@@ -175,137 +163,125 @@ export default function ShareMapPage() {
           padding: 16,
         }}
       >
+        {/* IMPORTANT: no extra inner padding/frame; let the PNG fill */}
         <div
           style={{
             width: "min(92vw, 560px)",
             aspectRatio: "1 / 1",
             borderRadius: 18,
-            background: "rgba(255,255,255,0.35)",
+            overflow: "hidden",
             boxShadow: "0 14px 50px rgba(0,0,0,0.25)",
-            padding: 12,
             position: "relative",
+            background: "rgba(0,0,0,0.10)",
           }}
         >
-          <div
-            style={{
-              width: "100%",
-              height: "100%",
-              borderRadius: 14,
-              background: "rgba(0,0,0,0.15)",
-              overflow: "hidden",
-              position: "relative",
-            }}
-          >
-            {!fid ? (
-              <div
-                style={{
-                  height: "100%",
-                  width: "100%",
-                  display: "grid",
-                  placeItems: "center",
-                  color: "rgba(0,0,0,0.75)",
-                  fontWeight: 800,
+          {!fid ? (
+            <div
+              style={{
+                height: "100%",
+                width: "100%",
+                display: "grid",
+                placeItems: "center",
+                color: "rgba(0,0,0,0.75)",
+                fontWeight: 800,
+              }}
+            >
+              Loading…
+            </div>
+          ) : (
+            <>
+              <img
+                src={imageSrc}
+                alt="Farmap"
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                onLoad={() => {
+                  setImgOk(true);
+                  setImgErr("");
+                  setLoadingImg(false);
                 }}
-              >
-                Loading…
-              </div>
-            ) : (
-              <>
-                <img
-                  src={imageSrc}
-                  alt="Farmap"
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                  onLoad={() => {
-                    setImgOk(true);
-                    setImgErr("");
-                    setLoadingImg(false);
-                  }}
-                  onError={() => {
-                    setImgOk(false);
-                    setImgErr("Map image failed to load (api/map-image returned an error).");
-                    setLoadingImg(false);
-                  }}
-                />
+                onError={() => {
+                  setImgOk(false);
+                  setImgErr("Map image failed to load (api/map-image returned an error).");
+                  setLoadingImg(false);
+                }}
+              />
 
-                {/* Loading overlay */}
-                {loadingImg && (
+              {/* Loading overlay */}
+              {loadingImg && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    zIndex: 20,
+                    background: "rgba(0,0,0,0.35)",
+                    display: "grid",
+                    placeItems: "center",
+                    pointerEvents: "none",
+                  }}
+                >
                   <div
                     style={{
-                      position: "absolute",
-                      inset: 0,
-                      zIndex: 20,
-                      background: "rgba(0,0,0,0.35)",
-                      display: "grid",
-                      placeItems: "center",
-                      pointerEvents: "none",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 320,
-                        borderRadius: 16,
-                        background: "rgba(0,0,0,0.65)",
-                        color: "white",
-                        padding: 14,
-                        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-                      }}
-                    >
-                      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                        <div
-                          style={{
-                            width: 18,
-                            height: 18,
-                            borderRadius: 999,
-                            border: "3px solid rgba(255,255,255,0.25)",
-                            borderTopColor: "white",
-                            animation: "spin 0.9s linear infinite",
-                          }}
-                        />
-                        <div style={{ fontWeight: 800 }}>Loading Farmap</div>
-                      </div>
-
-                      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-                        Loading map image…
-                      </div>
-                    </div>
-
-                    <style jsx global>{`
-                      @keyframes spin {
-                        to {
-                          transform: rotate(360deg);
-                        }
-                      }
-                    `}</style>
-                  </div>
-                )}
-
-                {/* Error overlay */}
-                {imgOk === false ? (
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      zIndex: 30,
-                      display: "grid",
-                      placeItems: "center",
+                      width: 320,
+                      borderRadius: 16,
+                      background: "rgba(0,0,0,0.65)",
+                      color: "white",
                       padding: 14,
-                      textAlign: "center",
-                      background: "rgba(255,255,255,0.85)",
-                      color: "#2b1b55",
-                      fontWeight: 800,
+                      boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
                     }}
                   >
-                    <div>
-                      <div style={{ fontSize: 14 }}>{imgErr}</div>
-                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, opacity: 0.9 }}>
-                        Try Reload (Pinata hub / Neynar can rate-limit).
-                      </div>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <div
+                        style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: 999,
+                          border: "3px solid rgba(255,255,255,0.25)",
+                          borderTopColor: "white",
+                          animation: "spin 0.9s linear infinite",
+                        }}
+                      />
+                      <div style={{ fontWeight: 800 }}>Loading Farmap</div>
+                    </div>
+
+                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>Loading map image…</div>
+                  </div>
+
+                  <style jsx global>{`
+                    @keyframes spin {
+                      to {
+                        transform: rotate(360deg);
+                      }
+                    }
+                  `}</style>
+                </div>
+              )}
+
+              {/* Error overlay */}
+              {imgOk === false ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    zIndex: 30,
+                    display: "grid",
+                    placeItems: "center",
+                    padding: 14,
+                    textAlign: "center",
+                    background: "rgba(255,255,255,0.85)",
+                    color: "#2b1b55",
+                    fontWeight: 800,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 14 }}>{imgErr}</div>
+                    <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, opacity: 0.9 }}>
+                      Try Reload (Pinata hub / Neynar can rate-limit).
                     </div>
                   </div>
-                ) : null}
-              </>
-            )}
-          </div>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     </main>
