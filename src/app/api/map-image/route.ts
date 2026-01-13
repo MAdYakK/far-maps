@@ -37,7 +37,6 @@ function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
-// WebMercator practical lat bounds
 const WORLD_MIN_LAT = -85.0511;
 const WORLD_MAX_LAT = 85.0511;
 const WORLD_MIN_LNG = -180;
@@ -179,7 +178,7 @@ export async function GET(req: Request) {
     const net = netJson as NetworkResponse;
     const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    // viewer username + pfp from payload
+    // viewer username + pfp
     let username = "user";
     let pfpUrl = "";
     for (const p of pointsRaw) {
@@ -195,7 +194,6 @@ export async function GET(req: Request) {
     // draw small first, big last
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
-    // legend stats
     const legend = {
       b1: 0,
       b2: 0,
@@ -212,18 +210,15 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
-    // If bounds are essentially "the world", force a minimum zoom so the map fills the card.
-    // (These thresholds are intentionally loose.)
     const worldish =
       !!bounds &&
-      typeof bounds?.sw?.[0] === "number" &&
-      typeof bounds?.ne?.[0] === "number" &&
-      typeof bounds?.sw?.[1] === "number" &&
-      typeof bounds?.ne?.[1] === "number" &&
-      Math.abs(bounds.ne[1] - bounds.sw[1]) > 300; // huge lng span
+      typeof (bounds as any)?.sw?.[0] === "number" &&
+      typeof (bounds as any)?.ne?.[0] === "number" &&
+      typeof (bounds as any)?.sw?.[1] === "number" &&
+      typeof (bounds as any)?.ne?.[1] === "number" &&
+      Math.abs((bounds as any).ne[1] - (bounds as any).sw[1]) > 300;
 
-    // A good “fills the card” zoom for world view.
-    const MIN_ZOOM_WORLD = 2; // tweakable: 2 or 2.25 if you want tighter
+    const MIN_ZOOM_WORLD = 2;
 
     const html = `<!doctype html>
 <html>
@@ -330,7 +325,6 @@ export async function GET(req: Request) {
       box-shadow: 0 12px 40px rgba(0,0,0,0.22);
     }
 
-    /* Top-right profile badge */
     #pfp{
       right: 18px;
       top: 18px;
@@ -419,6 +413,8 @@ export async function GET(req: Request) {
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
+    window.__MAP_READY__ = false;
+
     const points = ${JSON.stringify(
       points.map((p) => ({
         lat: clamp(Number(p.lat), WORLD_MIN_LAT, WORLD_MAX_LAT),
@@ -466,7 +462,8 @@ export async function GET(req: Request) {
       maxBoundsViscosity: 1.0,
     });
 
-    const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // Don’t block readiness on tiles
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 8,
       minZoom: 1,
       noWrap: true,
@@ -481,11 +478,8 @@ export async function GET(req: Request) {
 
       if (bounds && bounds.sw && bounds.ne) {
         const b = L.latLngBounds(bounds.sw, bounds.ne);
-        // smaller padding to “fill” more
         map.fitBounds(b, { padding:[10,10] });
 
-        // If the bounds are basically world-wide, force a minimum zoom so the map fills the card.
-        // (Also helps the preview tool look like your desired square example.)
         const z = map.getZoom();
         if (WORLDISH && z < MIN_ZOOM_WORLD) {
           map.setZoom(MIN_ZOOM_WORLD);
@@ -512,34 +506,33 @@ export async function GET(req: Request) {
       }
     }
 
-    // Wait for tiles to load + a frame so screenshot isn't taken early
-    let tilesLoaded = false;
-    tiles.on("load", () => { tilesLoaded = true; });
-
     map.whenReady(() => {
-      applyView();
+      try {
+        applyView();
 
-      // force a full layout recalculation in headless
-      requestAnimationFrame(() => {
-        map.invalidateSize(true);
+        // Force layout in headless
         requestAnimationFrame(() => {
           map.invalidateSize(true);
+          requestAnimationFrame(() => {
+            map.invalidateSize(true);
 
-          drawMarkers();
+            drawMarkers();
 
-          const start = Date.now();
-          const tick = () => {
-            const ok = tilesLoaded || (Date.now() - start) > 2500;
-            if (ok) {
+            // Always resolve readiness after a short settle,
+            // even if tiles are slow/rate-limited.
+            setTimeout(() => {
               window.__MAP_READY__ = true;
-            } else {
-              setTimeout(tick, 60);
-            }
-          };
-          tick();
+            }, 900);
+          });
         });
-      });
+      } catch (e) {
+        // Never hang the screenshot
+        window.__MAP_READY__ = true;
+      }
     });
+
+    // Absolute safety: never hang
+    setTimeout(() => { window.__MAP_READY__ = true; }, 5000);
   </script>
 </body>
 </html>`;
@@ -555,10 +548,15 @@ export async function GET(req: Request) {
 
     try {
       const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: "networkidle0" });
 
-      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 25_000 });
-      await new Promise((r) => setTimeout(r, 200));
+      // Faster + more reliable than networkidle0 for tile-heavy pages
+      await page.setContent(html, { waitUntil: "domcontentloaded" });
+
+      // Wait for Leaflet to mount
+      await page.waitForSelector(".leaflet-pane", { timeout: 15_000 });
+
+      // Wait for our ready flag (should always resolve now)
+      await page.waitForFunction(() => (window as any).__MAP_READY__ === true, { timeout: 20_000 });
 
       const png = await page.screenshot({ type: "png" });
 
