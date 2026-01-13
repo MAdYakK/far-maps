@@ -44,7 +44,6 @@ const WORLD_MIN_LNG = -180;
 const WORLD_MAX_LNG = 180;
 
 function normalizeLng(lng: number) {
-  // Force into [-180, 180] to avoid fitBounds selecting a wrapped world
   let x = lng;
   while (x > 180) x -= 360;
   while (x < -180) x += 360;
@@ -73,7 +72,6 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   if (minLat > maxLat || minLng > maxLng) return null;
 
-  // If all points are the same coordinate, expand slightly so fitBounds works nicely
   if (minLat === maxLat) {
     minLat = clamp(minLat - 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
     maxLat = clamp(maxLat + 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
@@ -97,7 +95,6 @@ function bucketKey(count: number) {
 }
 
 function bucketColor(key: string) {
-  // High contrast on OSM water/land
   if (key === "b8") return "#6D28D9"; // purple
   if (key === "b4") return "#06B6D4"; // cyan
   if (key === "b2") return "#F59E0B"; // amber
@@ -111,7 +108,6 @@ function escHtml(s: string) {
 function safeUrl(s: string) {
   try {
     const u = new URL(s);
-    // allow https only (avoid data:, javascript:, etc)
     if (u.protocol !== "https:") return "";
     return u.toString();
   } catch {
@@ -144,7 +140,6 @@ export async function GET(req: Request) {
     const w = clamp(parseNum(sp, "w", 1000), 600, 2000);
     const h = clamp(parseNum(sp, "h", 1000), 600, 2000);
 
-    // Use absolute base URL on server if available
     const base =
       process.env.NEXT_PUBLIC_URL && process.env.NEXT_PUBLIC_URL.startsWith("http")
         ? process.env.NEXT_PUBLIC_URL.replace(/\/+$/, "")
@@ -184,7 +179,7 @@ export async function GET(req: Request) {
     const net = netJson as NetworkResponse;
     const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    // Find viewer username + pfp from the network payload
+    // viewer username + pfp from payload
     let username = "user";
     let pfpUrl = "";
     for (const p of pointsRaw) {
@@ -197,10 +192,10 @@ export async function GET(req: Request) {
     }
     const pfpSafe = safeUrl(pfpUrl);
 
-    // Sort so higher counts render last (on top)
+    // draw small first, big last
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
-    // Legend stats
+    // legend stats
     const legend = {
       b1: 0,
       b2: 0,
@@ -217,11 +212,19 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
-    // IMPORTANT: stop world duplication:
-    // - tileLayer: noWrap: true
-    // - map: worldCopyJump: false
-    // - maxBounds set to one-world bounds
-    // - bounds normalized
+    // If bounds are essentially "the world", force a minimum zoom so the map fills the card.
+    // (These thresholds are intentionally loose.)
+    const worldish =
+      !!bounds &&
+      typeof bounds?.sw?.[0] === "number" &&
+      typeof bounds?.ne?.[0] === "number" &&
+      typeof bounds?.sw?.[1] === "number" &&
+      typeof bounds?.ne?.[1] === "number" &&
+      Math.abs(bounds.ne[1] - bounds.sw[1]) > 300; // huge lng span
+
+    // A good “fills the card” zoom for world view.
+    const MIN_ZOOM_WORLD = 2; // tweakable: 2 or 2.25 if you want tighter
+
     const html = `<!doctype html>
 <html>
 <head>
@@ -242,8 +245,6 @@ export async function GET(req: Request) {
       background: var(--purple);
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
     }
-
-    /* Purple frame */
     #frame{
       position:relative;
       width:100%;
@@ -252,8 +253,6 @@ export async function GET(req: Request) {
       box-sizing:border-box;
       background: var(--purple);
     }
-
-    /* Full-card */
     #card{
       position:relative;
       width:100%;
@@ -263,16 +262,14 @@ export async function GET(req: Request) {
       box-shadow: 0 18px 60px rgba(0,0,0,0.22);
       overflow:hidden;
     }
-
-    /* Map fills entire card (no inset) */
     #map{
       position:absolute;
       inset:0;
       width:100%;
       height:100%;
+      background: transparent;
     }
 
-    /* Overlays sit on top of map */
     .overlay{
       position:absolute;
       z-index:9999;
@@ -373,9 +370,9 @@ export async function GET(req: Request) {
       opacity:0.95;
     }
 
-    /* Make leaflet look cleaner */
     .leaflet-control-container { display:none; }
     .leaflet-tile { filter: saturate(1.05) contrast(1.03); }
+    .leaflet-container { background: transparent; }
   </style>
 </head>
 <body>
@@ -431,6 +428,8 @@ export async function GET(req: Request) {
     )};
 
     const bounds = ${JSON.stringify(bounds)};
+    const WORLDISH = ${JSON.stringify(worldish)};
+    const MIN_ZOOM_WORLD = ${JSON.stringify(MIN_ZOOM_WORLD)};
 
     const WORLD_BOUNDS = L.latLngBounds(
       L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
@@ -451,7 +450,6 @@ export async function GET(req: Request) {
       b8: "${bucketColor("b8")}",
     };
 
-    // Smaller pins; bigger count slightly larger
     function radiusFor(count){
       if (count >= 8) return 7;
       if (count >= 4) return 6;
@@ -462,34 +460,43 @@ export async function GET(req: Request) {
     const map = L.map("map", {
       zoomControl:false,
       attributionControl:false,
-      worldCopyJump:false,        // ✅ STOP jumping/wrapping
+      worldCopyJump:false,
       preferCanvas:true,
-      maxBounds: WORLD_BOUNDS,     // ✅ LOCK to one world
+      maxBounds: WORLD_BOUNDS,
       maxBoundsViscosity: 1.0,
     });
 
-    // ✅ noWrap prevents the "world repeats" tiles
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 8,
       minZoom: 1,
       noWrap: true,
       bounds: WORLD_BOUNDS,
     }).addTo(map);
 
-    // Set view/bounds
-    if (!points.length) {
-      map.setView([20,0], 2);
-    } else if (bounds && bounds.sw && bounds.ne) {
-      const b = L.latLngBounds(bounds.sw, bounds.ne);
-      map.fitBounds(b, { padding:[30,30] });
-    } else {
+    function applyView() {
+      if (!points.length) {
+        map.setView([20,0], 2);
+        return;
+      }
+
+      if (bounds && bounds.sw && bounds.ne) {
+        const b = L.latLngBounds(bounds.sw, bounds.ne);
+        // smaller padding to “fill” more
+        map.fitBounds(b, { padding:[10,10] });
+
+        // If the bounds are basically world-wide, force a minimum zoom so the map fills the card.
+        // (Also helps the preview tool look like your desired square example.)
+        const z = map.getZoom();
+        if (WORLDISH && z < MIN_ZOOM_WORLD) {
+          map.setZoom(MIN_ZOOM_WORLD);
+        }
+        return;
+      }
+
       map.setView([20,0], 2);
     }
 
-    // Ensure Leaflet measures correctly in headless
-    map.whenReady(() => {
-      map.invalidateSize(true);
-      // Render in ascending order so bigger ones are on top (already sorted server-side)
+    function drawMarkers() {
       for (const p of points) {
         const k = bucketKey(p.count);
         const color = colors[k] || colors.b1;
@@ -503,9 +510,35 @@ export async function GET(req: Request) {
           fillOpacity: 0.95,
         }).addTo(map);
       }
+    }
 
-      // Signal to puppeteer (after markers added)
-      window.__MAP_READY__ = true;
+    // Wait for tiles to load + a frame so screenshot isn't taken early
+    let tilesLoaded = false;
+    tiles.on("load", () => { tilesLoaded = true; });
+
+    map.whenReady(() => {
+      applyView();
+
+      // force a full layout recalculation in headless
+      requestAnimationFrame(() => {
+        map.invalidateSize(true);
+        requestAnimationFrame(() => {
+          map.invalidateSize(true);
+
+          drawMarkers();
+
+          const start = Date.now();
+          const tick = () => {
+            const ok = tilesLoaded || (Date.now() - start) > 2500;
+            if (ok) {
+              window.__MAP_READY__ = true;
+            } else {
+              setTimeout(tick, 60);
+            }
+          };
+          tick();
+        });
+      });
     });
   </script>
 </body>
@@ -524,8 +557,8 @@ export async function GET(req: Request) {
       const page = await browser.newPage();
       await page.setContent(html, { waitUntil: "networkidle0" });
 
-      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 20_000 });
-      await new Promise((r) => setTimeout(r, 250)); // small settle
+      await page.waitForFunction("window.__MAP_READY__ === true", { timeout: 25_000 });
+      await new Promise((r) => setTimeout(r, 200));
 
       const png = await page.screenshot({ type: "png" });
 
