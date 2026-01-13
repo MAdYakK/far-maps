@@ -3,8 +3,6 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
-import path from "path";
-import fs from "fs";
 
 type Mode = "followers" | "following" | "both";
 
@@ -116,14 +114,6 @@ function safeHttpsUrl(s: string) {
   }
 }
 
-function leafletLocalPaths() {
-  const root = process.cwd();
-  return {
-    cssPath: path.join(root, "node_modules", "leaflet", "dist", "leaflet.css"),
-    jsPath: path.join(root, "node_modules", "leaflet", "dist", "leaflet.js"),
-  };
-}
-
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const sp = url.searchParams;
@@ -224,6 +214,7 @@ export async function GET(req: Request) {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
     :root{ --purple:#cdb7ff; --card: rgba(255,255,255,0.35); }
     html, body { margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden; background:var(--purple);
@@ -233,7 +224,15 @@ export async function GET(req: Request) {
     #card{ position:relative; width:100%; height:100%; border-radius:28px; background:var(--card);
       box-shadow:0 18px 60px rgba(0,0,0,0.22); overflow:hidden;
     }
-    #map{ position:absolute; inset:0; width:100%; height:100%; background: rgba(0,0,0,0.06); }
+
+    /* ✅ MAP FILLS THE ENTIRE CARD */
+    #map{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      background: rgba(0,0,0,0.06);
+    }
 
     .overlay{ position:absolute; z-index:9999; pointer-events:none; }
 
@@ -312,11 +311,10 @@ export async function GET(req: Request) {
     </div>
   </div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // We only set READY once tiles + markers are actually drawn.
-    window.__LEAFLET_READY__ = false;
-    window.__TILES_READY__ = false;
-    window.__MARKERS_READY__ = false;
+    window.__MARKERS_ADDED__ = false;
+    window.__TILE_PIXELS__ = false;
 
     const points = ${JSON.stringify(
       points.map((p) => ({
@@ -349,78 +347,68 @@ export async function GET(req: Request) {
       return 4;
     }
 
-    function initLeaflet(){
-      const WORLD_BOUNDS = L.latLngBounds(
-        L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
-        L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
-      );
+    const WORLD_BOUNDS = L.latLngBounds(
+      L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
+      L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
+    );
 
-      const map = L.map("map", {
-        zoomControl:false,
-        attributionControl:false,
-        worldCopyJump:false,
-        preferCanvas:true,
-        maxBounds: WORLD_BOUNDS,
-        maxBoundsViscosity: 1.0,
-      });
+    const map = L.map("map", {
+      zoomControl:false,
+      attributionControl:false,
+      worldCopyJump:false,
+      preferCanvas:true,
+      maxBounds: WORLD_BOUNDS,
+      maxBoundsViscosity: 1.0
+    });
 
-      // NOTE: noWrap prevents "world duplication"
-      const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 8,
-        minZoom: 1,
-        noWrap: true,
-        bounds: WORLD_BOUNDS,
-        crossOrigin: true,
-      }).addTo(map);
+    const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 8,
+      minZoom: 1,
+      noWrap: true,
+      bounds: WORLD_BOUNDS,
+      crossOrigin: true,
+    }).addTo(map);
 
-      let tileLoads = 0;
-      tiles.on("tileload", () => {
-        tileLoads += 1;
-        if (tileLoads >= 1) window.__TILES_READY__ = true;
-      });
-
-      function applyView() {
-        if (!points.length) {
-          map.setView([20,0], 2);
-          return;
+    // ✅ Real tile pixels signal
+    tiles.on("tileload", (e) => {
+      try{
+        const img = e && e.tile;
+        if (img && img.complete && img.naturalWidth && img.naturalWidth > 0) {
+          window.__TILE_PIXELS__ = true;
         }
-        if (bounds && bounds.sw && bounds.ne) {
-          const b = L.latLngBounds(bounds.sw, bounds.ne);
-          map.fitBounds(b, { padding:[10,10] });
-          return;
-        }
-        map.setView([20,0], 2);
-      }
+      }catch{}
+    });
 
-      map.whenReady(() => {
-        window.__LEAFLET_READY__ = true;
-
-        applyView();
-
-        requestAnimationFrame(() => {
-          map.invalidateSize(true);
-
-          // Draw markers after one frame (helps sizing)
-          for (const p of points) {
-            const k = bucketKey(p.count);
-            const color = colors[k] || colors.b1;
-            const r = radiusFor(p.count);
-
-            L.circleMarker([p.lat, p.lng], {
-              radius: r,
-              weight: 2,
-              color: "rgba(0,0,0,0.55)",
-              fillColor: color,
-              fillOpacity: 0.95,
-            }).addTo(map);
-          }
-
-          window.__MARKERS_READY__ = true;
-        });
-      });
+    // View = same idea as share view, but tighter padding to fill square nicely
+    if (!points.length) {
+      map.setView([20,0], 2);
+    } else if (bounds && bounds.sw && bounds.ne) {
+      const b = L.latLngBounds(bounds.sw, bounds.ne);
+      map.fitBounds(b, { padding:[10,10] });
+    } else {
+      map.setView([20,0], 2);
     }
 
-    window.__INIT_LEAFLET__ = initLeaflet;
+    // add markers after first frame
+    requestAnimationFrame(() => {
+      map.invalidateSize(true);
+
+      for (const p of points) {
+        const k = bucketKey(p.count);
+        const color = colors[k] || colors.b1;
+        const r = radiusFor(p.count);
+
+        L.circleMarker([p.lat, p.lng], {
+          radius: r,
+          weight: 2,
+          color: "rgba(0,0,0,0.55)",
+          fillColor: color,
+          fillOpacity: 0.95,
+        }).addTo(map);
+      }
+
+      window.__MARKERS_ADDED__ = true;
+    });
   </script>
 </body>
 </html>`;
@@ -436,60 +424,20 @@ export async function GET(req: Request) {
     try {
       const page = await browser.newPage();
 
-      // Helps tile servers behave better
       await page.setUserAgent(
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
       );
 
-      // Load HTML first
-      await page.setContent(html, { waitUntil: "domcontentloaded" });
+      // This was reliable for you before
+      await page.setContent(html, { waitUntil: "networkidle0" });
 
-      // Inject Leaflet from disk (preferred) or CDN (fallback)
-      const { cssPath, jsPath } = leafletLocalPaths();
-      const cssExists = fs.existsSync(cssPath);
-      const jsExists = fs.existsSync(jsPath);
+      // Wait until markers were added
+      await page.waitForFunction("window.__MARKERS_ADDED__ === true", { timeout: 25000 });
 
-      if (cssExists) {
-        await page.addStyleTag({ path: cssPath });
-      } else {
-        await page.addStyleTag({ url: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" });
-      }
+      // Wait until at least one tile has real pixels
+      await page.waitForFunction("window.__TILE_PIXELS__ === true", { timeout: 30000 });
 
-      if (jsExists) {
-        await page.addScriptTag({ path: jsPath });
-      } else {
-        await page.addScriptTag({ url: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" });
-      }
-
-      // Start map
-      await page.evaluate(() => {
-        // @ts-ignore
-        window.__INIT_LEAFLET__?.();
-      });
-
-      // Confirm Leaflet initialized
-      await page.waitForSelector(".leaflet-pane", { timeout: 15_000 });
-
-      // Wait markers scheduled
-      await page.waitForFunction(() => (window as any).__MARKERS_READY__ === true, { timeout: 15_000 });
-
-      // ✅ This is the important part: wait for real tile pixels
-      await page.waitForFunction(() => {
-        const imgs = Array.from(document.querySelectorAll("img.leaflet-tile"));
-        const loaded = imgs.filter((img: any) => {
-          return (
-            img &&
-            img.classList &&
-            img.classList.contains("leaflet-tile-loaded") &&
-            img.complete === true &&
-            typeof img.naturalWidth === "number" &&
-            img.naturalWidth > 0
-          );
-        });
-        return loaded.length >= 1;
-      }, { timeout: 25_000 });
-
-      // Small settle
+      // tiny settle
       await new Promise((r) => setTimeout(r, 250));
 
       const png = await page.screenshot({ type: "png" });
