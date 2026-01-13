@@ -61,7 +61,6 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   for (const p of points) {
     if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
-
     const lat = clamp(p.lat, WORLD_MIN_LAT, WORLD_MAX_LAT);
     const lng = normalizeLng(p.lng);
 
@@ -73,6 +72,7 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   if (minLat > maxLat || minLng > maxLng) return null;
 
+  // expand if single point
   if (minLat === maxLat) {
     minLat = clamp(minLat - 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
     maxLat = clamp(maxLat + 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
@@ -117,10 +117,11 @@ function safeHttpsUrl(s: string) {
 }
 
 function leafletLocalPaths() {
-  const root = process.cwd(); // /var/task on Vercel
-  const cssPath = path.join(root, "node_modules", "leaflet", "dist", "leaflet.css");
-  const jsPath = path.join(root, "node_modules", "leaflet", "dist", "leaflet.js");
-  return { cssPath, jsPath };
+  const root = process.cwd();
+  return {
+    cssPath: path.join(root, "node_modules", "leaflet", "dist", "leaflet.css"),
+    jsPath: path.join(root, "node_modules", "leaflet", "dist", "leaflet.js"),
+  };
 }
 
 export async function GET(req: Request) {
@@ -200,7 +201,7 @@ export async function GET(req: Request) {
     }
     const pfpSafe = safeHttpsUrl(pfpUrl);
 
-    // markers: small first, big last (big on top)
+    // markers: small first, big last
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
     const legend = {
@@ -218,12 +219,6 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
-    const worldish =
-      !!bounds &&
-      typeof (bounds as any)?.sw?.[1] === "number" &&
-      typeof (bounds as any)?.ne?.[1] === "number" &&
-      Math.abs((bounds as any).ne[1] - (bounds as any).sw[1]) > 300;
-
     const html = `<!doctype html>
 <html>
 <head>
@@ -238,8 +233,7 @@ export async function GET(req: Request) {
     #card{ position:relative; width:100%; height:100%; border-radius:28px; background:var(--card);
       box-shadow:0 18px 60px rgba(0,0,0,0.22); overflow:hidden;
     }
-    /* map fills full card */
-    #map{ position:absolute; inset:0; width:100%; height:100%; background: rgba(0,0,0,0.05); }
+    #map{ position:absolute; inset:0; width:100%; height:100%; background: rgba(0,0,0,0.06); }
 
     .overlay{ position:absolute; z-index:9999; pointer-events:none; }
 
@@ -319,7 +313,10 @@ export async function GET(req: Request) {
   </div>
 
   <script>
-    window.__MAP_READY__ = false;
+    // We only set READY once tiles + markers are actually drawn.
+    window.__LEAFLET_READY__ = false;
+    window.__TILES_READY__ = false;
+    window.__MARKERS_READY__ = false;
 
     const points = ${JSON.stringify(
       points.map((p) => ({
@@ -330,8 +327,6 @@ export async function GET(req: Request) {
     )};
 
     const bounds = ${JSON.stringify(bounds)};
-    const WORLDISH = ${JSON.stringify(worldish)};
-    const MIN_ZOOM_WORLD = 2;
 
     function bucketKey(count){
       if (count >= 8) return "b8";
@@ -355,76 +350,74 @@ export async function GET(req: Request) {
     }
 
     function initLeaflet(){
-      try{
-        if (!window.L) throw new Error("Leaflet not loaded");
+      const WORLD_BOUNDS = L.latLngBounds(
+        L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
+        L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
+      );
 
-        const WORLD_BOUNDS = L.latLngBounds(
-          L.latLng(${WORLD_MIN_LAT}, ${WORLD_MIN_LNG}),
-          L.latLng(${WORLD_MAX_LAT}, ${WORLD_MAX_LNG})
-        );
+      const map = L.map("map", {
+        zoomControl:false,
+        attributionControl:false,
+        worldCopyJump:false,
+        preferCanvas:true,
+        maxBounds: WORLD_BOUNDS,
+        maxBoundsViscosity: 1.0,
+      });
 
-        const map = L.map("map", {
-          zoomControl:false,
-          attributionControl:false,
-          worldCopyJump:false,
-          preferCanvas:true,
-          maxBounds: WORLD_BOUNDS,
-          maxBoundsViscosity: 1.0,
-        });
+      // NOTE: noWrap prevents "world duplication"
+      const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 8,
+        minZoom: 1,
+        noWrap: true,
+        bounds: WORLD_BOUNDS,
+        crossOrigin: true,
+      }).addTo(map);
 
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          maxZoom: 8,
-          minZoom: 1,
-          noWrap: true,
-          bounds: WORLD_BOUNDS,
-        }).addTo(map);
+      let tileLoads = 0;
+      tiles.on("tileload", () => {
+        tileLoads += 1;
+        if (tileLoads >= 1) window.__TILES_READY__ = true;
+      });
 
-        function applyView() {
-          if (!points.length) {
-            map.setView([20,0], 2);
-            return;
-          }
-          if (bounds && bounds.sw && bounds.ne) {
-            const b = L.latLngBounds(bounds.sw, bounds.ne);
-            map.fitBounds(b, { padding:[10,10] });
-            const z = map.getZoom();
-            if (WORLDISH && z < MIN_ZOOM_WORLD) map.setZoom(MIN_ZOOM_WORLD);
-            return;
-          }
+      function applyView() {
+        if (!points.length) {
           map.setView([20,0], 2);
+          return;
         }
-
-        map.whenReady(() => {
-          applyView();
-
-          requestAnimationFrame(() => {
-            map.invalidateSize(true);
-            requestAnimationFrame(() => {
-              map.invalidateSize(true);
-
-              for (const p of points) {
-                const k = bucketKey(p.count);
-                const color = colors[k] || colors.b1;
-                const r = radiusFor(p.count);
-
-                L.circleMarker([p.lat, p.lng], {
-                  radius: r,
-                  weight: 2,
-                  color: "rgba(0,0,0,0.55)",
-                  fillColor: color,
-                  fillOpacity: 0.95,
-                }).addTo(map);
-              }
-
-              setTimeout(() => { window.__MAP_READY__ = true; }, 900);
-            });
-          });
-        });
-
-        setTimeout(() => { window.__MAP_READY__ = true; }, 6000);
-      } catch (e) {
-        window.__MAP_READY__ = true;
+        if (bounds && bounds.sw && bounds.ne) {
+          const b = L.latLngBounds(bounds.sw, bounds.ne);
+          map.fitBounds(b, { padding:[10,10] });
+          return;
+        }
+        map.setView([20,0], 2);
       }
+
+      map.whenReady(() => {
+        window.__LEAFLET_READY__ = true;
+
+        applyView();
+
+        requestAnimationFrame(() => {
+          map.invalidateSize(true);
+
+          // Draw markers after one frame (helps sizing)
+          for (const p of points) {
+            const k = bucketKey(p.count);
+            const color = colors[k] || colors.b1;
+            const r = radiusFor(p.count);
+
+            L.circleMarker([p.lat, p.lng], {
+              radius: r,
+              weight: 2,
+              color: "rgba(0,0,0,0.55)",
+              fillColor: color,
+              fillOpacity: 0.95,
+            }).addTo(map);
+          }
+
+          window.__MARKERS_READY__ = true;
+        });
+      });
     }
 
     window.__INIT_LEAFLET__ = initLeaflet;
@@ -443,7 +436,12 @@ export async function GET(req: Request) {
     try {
       const page = await browser.newPage();
 
-      // Load base HTML first
+      // Helps tile servers behave better
+      await page.setUserAgent(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+      );
+
+      // Load HTML first
       await page.setContent(html, { waitUntil: "domcontentloaded" });
 
       // Inject Leaflet from disk (preferred) or CDN (fallback)
@@ -469,11 +467,30 @@ export async function GET(req: Request) {
         window.__INIT_LEAFLET__?.();
       });
 
-      // If Leaflet truly loaded, this appears
+      // Confirm Leaflet initialized
       await page.waitForSelector(".leaflet-pane", { timeout: 15_000 });
 
-      // Wait ready (or internal fallback sets ready)
-      await page.waitForFunction(() => (window as any).__MAP_READY__ === true, { timeout: 25_000 });
+      // Wait markers scheduled
+      await page.waitForFunction(() => (window as any).__MARKERS_READY__ === true, { timeout: 15_000 });
+
+      // ✅ This is the important part: wait for real tile pixels
+      await page.waitForFunction(() => {
+        const imgs = Array.from(document.querySelectorAll("img.leaflet-tile"));
+        const loaded = imgs.filter((img: any) => {
+          return (
+            img &&
+            img.classList &&
+            img.classList.contains("leaflet-tile-loaded") &&
+            img.complete === true &&
+            typeof img.naturalWidth === "number" &&
+            img.naturalWidth > 0
+          );
+        });
+        return loaded.length >= 1;
+      }, { timeout: 25_000 });
+
+      // Small settle
+      await new Promise((r) => setTimeout(r, 250));
 
       const png = await page.screenshot({ type: "png" });
 
