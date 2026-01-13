@@ -3,7 +3,8 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
-import { createRequire } from "module";
+import path from "path";
+import fs from "fs";
 
 type Mode = "followers" | "following" | "both";
 
@@ -24,8 +25,6 @@ type NetworkResponse = {
     }>;
   }>;
 };
-
-const require = createRequire(import.meta.url);
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, n));
@@ -74,7 +73,6 @@ function computeBounds(points: { lat: number; lng: number }[]) {
 
   if (minLat > maxLat || minLng > maxLng) return null;
 
-  // Expand if single coordinate so fitBounds works
   if (minLat === maxLat) {
     minLat = clamp(minLat - 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
     maxLat = clamp(maxLat + 0.25, WORLD_MIN_LAT, WORLD_MAX_LAT);
@@ -118,6 +116,13 @@ function safeHttpsUrl(s: string) {
   }
 }
 
+function leafletLocalPaths() {
+  const root = process.cwd(); // /var/task on Vercel
+  const cssPath = path.join(root, "node_modules", "leaflet", "dist", "leaflet.css");
+  const jsPath = path.join(root, "node_modules", "leaflet", "dist", "leaflet.js");
+  return { cssPath, jsPath };
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const sp = url.searchParams;
@@ -143,7 +148,6 @@ export async function GET(req: Request) {
     const w = clamp(parseNum(sp, "w", 1000), 600, 2000);
     const h = clamp(parseNum(sp, "h", 1000), 600, 2000);
 
-    // Fetch your own /api/network
     const base =
       process.env.NEXT_PUBLIC_URL && process.env.NEXT_PUBLIC_URL.startsWith("http")
         ? process.env.NEXT_PUBLIC_URL.replace(/\/+$/, "")
@@ -183,7 +187,7 @@ export async function GET(req: Request) {
     const net = netJson as NetworkResponse;
     const pointsRaw = Array.isArray(net.points) ? net.points : [];
 
-    // username + pfp for overlays
+    // username + pfp
     let username = "user";
     let pfpUrl = "";
     for (const p of pointsRaw) {
@@ -196,10 +200,9 @@ export async function GET(req: Request) {
     }
     const pfpSafe = safeHttpsUrl(pfpUrl);
 
-    // Sort so bigger pins render on top
+    // markers: small first, big last (big on top)
     const points = [...pointsRaw].sort((a, b) => (a.count || 0) - (b.count || 0));
 
-    // Legend
     const legend = {
       b1: 0,
       b2: 0,
@@ -215,159 +218,74 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
-    // Detect “world-ish” bounds (to avoid ultra-zoomed-out / duplicated world look)
     const worldish =
       !!bounds &&
       typeof (bounds as any)?.sw?.[1] === "number" &&
       typeof (bounds as any)?.ne?.[1] === "number" &&
       Math.abs((bounds as any).ne[1] - (bounds as any).sw[1]) > 300;
 
-    const MIN_ZOOM_WORLD = 2;
-
-    // IMPORTANT: no external Leaflet includes here.
     const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root{
-      --purple:#cdb7ff;
-      --card: rgba(255,255,255,0.35);
-    }
-    html, body {
-      margin:0;
-      padding:0;
-      width:${w}px;
-      height:${h}px;
-      overflow:hidden;
-      background: var(--purple);
+    :root{ --purple:#cdb7ff; --card: rgba(255,255,255,0.35); }
+    html, body { margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden; background:var(--purple);
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
     }
-    #frame{
-      position:relative;
-      width:100%;
-      height:100%;
-      padding: 14px;
-      box-sizing:border-box;
-      background: var(--purple);
+    #frame{ position:relative; width:100%; height:100%; padding:14px; box-sizing:border-box; background:var(--purple); }
+    #card{ position:relative; width:100%; height:100%; border-radius:28px; background:var(--card);
+      box-shadow:0 18px 60px rgba(0,0,0,0.22); overflow:hidden;
     }
-    #card{
-      position:relative;
-      width:100%;
-      height:100%;
-      border-radius: 28px;
-      background: var(--card);
-      box-shadow: 0 18px 60px rgba(0,0,0,0.22);
-      overflow:hidden;
-    }
-
-    /* Map fills the FULL card space */
-    #map{
-      position:absolute;
-      inset:0;
-      width:100%;
-      height:100%;
-      background: rgba(0,0,0,0.05);
-    }
+    /* map fills full card */
+    #map{ position:absolute; inset:0; width:100%; height:100%; background: rgba(0,0,0,0.05); }
 
     .overlay{ position:absolute; z-index:9999; pointer-events:none; }
 
     #legend{
-      left: 18px;
-      bottom: 18px;
-      background: rgba(0,0,0,0.62);
-      color: white;
-      border-radius: 16px;
-      padding: 12px 12px 10px 12px;
-      width: 320px;
-      box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+      left:18px; bottom:18px;
+      background:rgba(0,0,0,0.62); color:white;
+      border-radius:16px; padding:12px 12px 10px 12px; width:320px;
+      box-shadow:0 12px 40px rgba(0,0,0,0.22);
     }
-    #legendTitle{
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      font-weight:900;
-      font-size:14px;
-      margin-bottom:8px;
-    }
-    .row{
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      font-size:13px;
-      padding: 5px 0;
-      border-top: 1px solid rgba(255,255,255,0.10);
-    }
+    #legendTitle{ display:flex; justify-content:space-between; align-items:center; font-weight:900; font-size:14px; margin-bottom:8px; }
+    .row{ display:flex; justify-content:space-between; align-items:center; font-size:13px; padding:5px 0; border-top:1px solid rgba(255,255,255,0.10); }
     .row:first-of-type{ border-top:none; }
-    .left{
-      display:flex;
-      align-items:center;
-      gap:10px;
-      opacity:0.95;
-    }
-    .dot{
-      width: 11px;
-      height: 11px;
-      border-radius: 999px;
-      box-shadow: 0 0 0 2px rgba(0,0,0,0.35);
-    }
+    .left{ display:flex; align-items:center; gap:10px; opacity:0.95; }
+    .dot{ width:11px; height:11px; border-radius:999px; box-shadow:0 0 0 2px rgba(0,0,0,0.35); }
 
     #watermark{
-      right: 18px;
-      bottom: 18px;
-      background: rgba(0,0,0,0.62);
-      color: white;
-      border-radius: 999px;
-      padding: 10px 14px;
-      font-weight: 900;
-      font-size: 14px;
-      box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+      right:18px; bottom:18px;
+      background:rgba(0,0,0,0.62); color:white;
+      border-radius:999px; padding:10px 14px;
+      font-weight:900; font-size:14px;
+      box-shadow:0 12px 40px rgba(0,0,0,0.22);
     }
 
     #pfp{
-      right: 18px;
-      top: 18px;
-      width: 120px;
-      height: 120px;
-      border-radius: 999px;
-      background: rgba(0,0,0,0.35);
-      box-shadow: 0 14px 50px rgba(0,0,0,0.25);
-      display: grid;
-      place-items: center;
-      overflow:hidden;
+      right:18px; top:18px; width:120px; height:120px; border-radius:999px;
+      background:rgba(0,0,0,0.35);
+      box-shadow:0 14px 50px rgba(0,0,0,0.25);
+      display:grid; place-items:center; overflow:hidden;
     }
     #pfpInner{
-      width: 112px;
-      height: 112px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.12);
+      width:112px; height:112px; border-radius:999px;
+      background:rgba(255,255,255,0.12);
       overflow:hidden;
       box-shadow: inset 0 0 0 3px rgba(255,255,255,0.20);
       position:relative;
     }
-    #pfpInner.hasImg{
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-    }
+    #pfpInner.hasImg{ background-size:cover; background-position:center; background-repeat:no-repeat; }
     #pfpFallback{
-      position:absolute;
-      inset:0;
-      display:grid;
-      place-items:center;
-      color:white;
-      font-weight:900;
-      font-size:34px;
-      letter-spacing: -0.5px;
-      text-transform: uppercase;
+      position:absolute; inset:0; display:grid; place-items:center;
+      color:white; font-weight:900; font-size:34px; letter-spacing:-0.5px; text-transform:uppercase;
       opacity:0.95;
     }
 
-    /* Leaflet cleanup */
-    .leaflet-control-container { display:none; }
-    .leaflet-container { background: transparent; }
-    .leaflet-tile { filter: saturate(1.05) contrast(1.03); }
+    .leaflet-control-container{ display:none; }
+    .leaflet-container{ background: transparent; }
+    .leaflet-tile{ filter: saturate(1.05) contrast(1.03); }
   </style>
 </head>
 <body>
@@ -380,27 +298,15 @@ export async function GET(req: Request) {
           <div>Legend</div>
           <div style="opacity:0.9;font-weight:800">${legend.pins} pins • ${legend.users} users</div>
         </div>
-        <div class="row">
-          <div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div>
-          <div style="font-weight:900">${legend.b1} pins</div>
-        </div>
-        <div class="row">
-          <div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div>
-          <div style="font-weight:900">${legend.b2} pins</div>
-        </div>
-        <div class="row">
-          <div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div>
-          <div style="font-weight:900">${legend.b4} pins</div>
-        </div>
-        <div class="row">
-          <div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div>
-          <div style="font-weight:900">${legend.b8} pins</div>
-        </div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div><div style="font-weight:900">${legend.b1} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div><div style="font-weight:900">${legend.b2} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div><div style="font-weight:900">${legend.b4} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div><div style="font-weight:900">${legend.b8} pins</div></div>
       </div>
 
       <div id="watermark" class="overlay">Far Maps • ${escHtml(String(username))}</div>
 
-      <div id="pfp" class="overlay" aria-hidden="true">
+      <div id="pfp" class="overlay">
         <div id="pfpInner" class="${pfpSafe ? "hasImg" : ""}" style="${
       pfpSafe ? `background-image:url('${pfpSafe.replace(/'/g, "%27")}')` : ""
     }">
@@ -425,7 +331,7 @@ export async function GET(req: Request) {
 
     const bounds = ${JSON.stringify(bounds)};
     const WORLDISH = ${JSON.stringify(worldish)};
-    const MIN_ZOOM_WORLD = ${JSON.stringify(MIN_ZOOM_WORLD)};
+    const MIN_ZOOM_WORLD = 2;
 
     function bucketKey(count){
       if (count >= 8) return "b8";
@@ -491,13 +397,11 @@ export async function GET(req: Request) {
         map.whenReady(() => {
           applyView();
 
-          // force layout in headless
           requestAnimationFrame(() => {
             map.invalidateSize(true);
             requestAnimationFrame(() => {
               map.invalidateSize(true);
 
-              // draw markers
               for (const p of points) {
                 const k = bucketKey(p.count);
                 const color = colors[k] || colors.b1;
@@ -512,13 +416,11 @@ export async function GET(req: Request) {
                 }).addTo(map);
               }
 
-              // settle then ready
               setTimeout(() => { window.__MAP_READY__ = true; }, 900);
             });
           });
         });
 
-        // never hang
         setTimeout(() => { window.__MAP_READY__ = true; }, 6000);
       } catch (e) {
         window.__MAP_READY__ = true;
@@ -530,7 +432,6 @@ export async function GET(req: Request) {
 </body>
 </html>`;
 
-    // Puppeteer + Chromium
     const executablePath = await chromium.executablePath();
     const browser = await puppeteer.launch({
       args: chromium.args,
@@ -542,26 +443,36 @@ export async function GET(req: Request) {
     try {
       const page = await browser.newPage();
 
-      // Set HTML first (no external Leaflet)
+      // Load base HTML first
       await page.setContent(html, { waitUntil: "domcontentloaded" });
 
-      // Inject Leaflet from local node_modules (reliable)
-      const leafletCssPath = require.resolve("leaflet/dist/leaflet.css");
-      const leafletJsPath = require.resolve("leaflet/dist/leaflet.js");
+      // Inject Leaflet from disk (preferred) or CDN (fallback)
+      const { cssPath, jsPath } = leafletLocalPaths();
+      const cssExists = fs.existsSync(cssPath);
+      const jsExists = fs.existsSync(jsPath);
 
-      await page.addStyleTag({ path: leafletCssPath });
-      await page.addScriptTag({ path: leafletJsPath });
+      if (cssExists) {
+        await page.addStyleTag({ path: cssPath });
+      } else {
+        await page.addStyleTag({ url: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" });
+      }
 
-      // Now run init inside the page
+      if (jsExists) {
+        await page.addScriptTag({ path: jsPath });
+      } else {
+        await page.addScriptTag({ url: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" });
+      }
+
+      // Start map
       await page.evaluate(() => {
         // @ts-ignore
         window.__INIT_LEAFLET__?.();
       });
 
-      // Leaflet should mount
+      // If Leaflet truly loaded, this appears
       await page.waitForSelector(".leaflet-pane", { timeout: 15_000 });
 
-      // Wait until we're ready for screenshot
+      // Wait ready (or internal fallback sets ready)
       await page.waitForFunction(() => (window as any).__MAP_READY__ === true, { timeout: 25_000 });
 
       const png = await page.screenshot({ type: "png" });
