@@ -58,7 +58,8 @@ export default function ShareMapPage() {
         await sdk.actions.ready();
         const ctx = await sdk.context;
         const detectedFid =
-          ((ctx as any)?.viewer?.fid as number | undefined) ?? ((ctx as any)?.user?.fid as number | undefined);
+          ((ctx as any)?.viewer?.fid as number | undefined) ??
+          ((ctx as any)?.user?.fid as number | undefined);
         if (detectedFid) setFid(detectedFid);
       } catch {
         // ignore
@@ -97,7 +98,10 @@ export default function ShareMapPage() {
       setSharing(true);
       await sdk.actions.composeCast({
         text: "My Farmap! Check out yours!",
-        embeds: [imageAbsolute],
+        embeds: [
+          imageAbsolute,
+          "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps", // ✅ include the miniapp embed too
+        ],
       });
     } catch (e: any) {
       setImgErr(e?.message || "Failed to share");
@@ -150,7 +154,9 @@ export default function ShareMapPage() {
             {sharing ? "Sharing…" : "Share"}
           </BubbleButton>
 
-          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{fid ? `FID ${fid} • ${mode}` : "Loading…"}</div>
+          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
+            {fid ? `FID ${fid} • ${mode}` : "Loading…"}
+          </div>
         </div>
       </div>
 
