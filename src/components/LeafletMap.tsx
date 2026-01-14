@@ -173,13 +173,12 @@ function ClampToWorld() {
   const map = useMap();
 
   useEffect(() => {
-    // Hard clamp panning to one world
     map.setMaxBounds(WORLD_BOUNDS);
 
-    // If user flings hard, keep them inside
+    // Keep users from zooming out too far (still can zoom via +/-)
     map.setMinZoom(2);
 
-    // Make sure Leaflet respects bounds strongly
+    // Extra safety: ensure map cannot wrap even if dragged hard
     // (maxBoundsViscosity is also set on MapContainer)
   }, [map]);
 
@@ -212,13 +211,21 @@ export default function LeafletMap({
       center={center}
       zoom={zoom}
       style={{ height: "100%", width: "100%" }}
-      // ✅ These are the important “single world” bits:
+      // ✅ Single world / no repeat
       worldCopyJump={false}
       maxBounds={WORLD_BOUNDS}
       maxBoundsViscosity={1.0}
       minZoom={2}
       maxZoom={8}
-      // ✅ keep default zoom control position (top-left) — do NOT set zoomControl={false}
+      // ✅ IMPORTANT: allow pan, disable gesture zoom
+      dragging={true}
+      scrollWheelZoom={false}   // disables mouse wheel + trackpad pinch-to-zoom behavior
+      touchZoom={false}         // disables pinch zoom on mobile
+      doubleClickZoom={false}   // disables double-tap zoom
+      boxZoom={false}
+      keyboard={false}
+      // ✅ keep +/- controls (default true)
+      zoomControl={true}
     >
       <ClampToWorld />
 
