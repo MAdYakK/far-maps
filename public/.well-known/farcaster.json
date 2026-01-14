@@ -3,5 +3,24 @@
     "header": "eyJmaWQiOjE0MzY5LCJ0eXBlIjoiYXV0aCIsImtleSI6IjB4ZmEzQ2UyNzRGMDViQjAxQjhkQzg1YTlERkY5NkNhRThjNWM4NjllNiJ9",
     "payload": "eyJkb21haW4iOiJmYXItbWFwcy52ZXJjZWwuYXBwIn0",
     "signature": "h7HIu23nKR90hJWTIIpQ8OvqLHgi1ErpswDYNdW2l64rVM3cK98sEK0Wr2vp516IN39OHvLNQMumCkTqasgwRBw="
+  },
+  "frame": {
+    "name": "FarMaps",
+    "version": "1",
+    "iconUrl": "https://far-maps.vercel.app/icon.png",
+    "homeUrl": "https://far-maps.vercel.app",
+    "imageUrl": "https://far-maps.vercel.app/embed.png",
+    "buttonTitle": "Open Map!",
+    "splashImageUrl": "https://far-maps.vercel.app/splash.png",
+    "splashBackgroundColor": "#aad6e3",
+    "webhookUrl": "https://far-maps.vercel.app/api/webhook",
+    "primaryCategory": "social",
+    "subtitle": "See where your people are!",
+    "description": "View your followers and who you follow! If they share a location, you'll see them on your map!",
+    "ogImageUrl": "https://far-maps.vercel.app/og-image.png",
+    "heroImageUrl": "https://far-maps.vercel.app/og-image.png",
+    "screenshotUrls": [
+      "https://far-maps.vercel.app/screenshot.png"
+    ]
   }
 }
