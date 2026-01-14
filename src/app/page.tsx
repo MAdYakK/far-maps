@@ -50,21 +50,17 @@ const LeafletMap = dynamic(
 
 export default function HomePage() {
   const [fid, setFid] = useState<number | null>(null);
-
   const [points, setPoints] = useState<PinPoint[]>([]);
   const [stats, setStats] = useState<NetworkResponse | null>(null);
-
   const [mode, setMode] = useState<Mode>("both");
 
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
-  // Debug-only state
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
-  // Abort in-flight requests
   const abortRef = useRef<AbortController | null>(null);
 
   // ─────────────────────────────────────────────
@@ -76,9 +72,7 @@ export default function HomePage() {
         if (DEBUG) setCtxStatus("Calling sdk.actions.ready()…");
         await sdk.actions.ready();
 
-        if (DEBUG) setCtxStatus("Fetching sdk.context…");
         const ctx = await sdk.context;
-
         if (DEBUG) setCtxJson(JSON.stringify(ctx, null, 2));
 
         const detectedFid =
@@ -87,23 +81,15 @@ export default function HomePage() {
 
         if (detectedFid) {
           setFid(detectedFid);
-          if (DEBUG) setCtxStatus(`Got fid: ${detectedFid}`);
-        } else {
-          if (DEBUG) setCtxStatus("No fid in context");
         }
-
-        if (DEBUG) console.log("MINIAPP_CONTEXT", ctx);
       } catch (e: any) {
-        if (DEBUG) {
-          console.log("MINIAPP_CONTEXT_ERROR", e);
-          setCtxStatus(`Context error: ${e?.message || String(e)}`);
-        }
+        if (DEBUG) setCtxStatus(e?.message || String(e));
       }
     })();
   }, []);
 
   // ─────────────────────────────────────────────
-  // Fetch network data (mode toggle)
+  // Fetch network data
   // ─────────────────────────────────────────────
   useEffect(() => {
     if (!fid) return;
@@ -130,48 +116,29 @@ export default function HomePage() {
         const maxEach = 5000;
         const minScore = 0.8;
         const concurrency = 4;
-
         const hubPageSize = 50;
         const hubDelayMs = 150;
 
         const url =
           `/api/network?fid=${fid}` +
           `&mode=${mode}` +
-          `&limitEach=${encodeURIComponent(String(limitEach))}` +
-          `&maxEach=${encodeURIComponent(String(maxEach))}` +
-          `&minScore=${encodeURIComponent(String(minScore))}` +
-          `&concurrency=${encodeURIComponent(String(concurrency))}` +
-          `&hubPageSize=${encodeURIComponent(String(hubPageSize))}` +
-          `&hubDelayMs=${encodeURIComponent(String(hubDelayMs))}`;
+          `&limitEach=${limitEach}` +
+          `&maxEach=${maxEach}` +
+          `&minScore=${minScore}` +
+          `&concurrency=${concurrency}` +
+          `&hubPageSize=${hubPageSize}` +
+          `&hubDelayMs=${hubDelayMs}`;
 
         const res = await fetch(url, { cache: "no-store", signal: controller.signal });
-
         const text = await res.text();
-        let json: any = null;
-        try {
-          json = text ? JSON.parse(text) : null;
-        } catch {
-          json = null;
-        }
+        const json = text ? JSON.parse(text) : null;
 
-        if (!res.ok) {
-          const msg =
-            json?.error ||
-            `API error ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ""}`;
-          throw new Error(msg);
-        }
+        if (!res.ok || !json) throw new Error("Network error");
 
-        if (!json) throw new Error("API returned empty or non-JSON response");
-
-        setLoadingStage("Rendering map…");
-
-        setPoints(Array.isArray(json.points) ? json.points : []);
-        setStats(json as NetworkResponse);
+        setPoints(json.points || []);
+        setStats(json);
       } catch (e: any) {
-        if (e?.name === "AbortError") return;
-        setError(e?.message || "Unknown error");
-        setPoints([]);
-        setStats(null);
+        if (e?.name !== "AbortError") setError(e?.message || "Error");
       } finally {
         setLoading(false);
         setLoadingStage("");
@@ -194,7 +161,7 @@ export default function HomePage() {
           position: "absolute",
           zIndex: 1000,
           top: 12,
-          left: 56, // ✅ shift right so zoom +/- won't cover it
+          left: 56,
           padding: 10,
           borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
@@ -202,7 +169,7 @@ export default function HomePage() {
           maxWidth: 420,
         }}
       >
-        <div style={{ fontWeight: 700 }}>{process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}</div>
+        <div style={{ fontWeight: 700 }}>Far Maps</div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
@@ -214,52 +181,35 @@ export default function HomePage() {
           <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
             Both
           </ToggleButton>
+
+          {/* ✅ SHARE BUTTON */}
+          <ToggleButton
+            active={false}
+            onClick={() => {
+              if (!fid) return;
+
+              const qs =
+                `fid=${fid}` +
+                `&mode=${mode}` +
+                `&minScore=0.8` +
+                `&limitEach=800` +
+                `&maxEach=5000` +
+                `&concurrency=4` +
+                `&hubPageSize=50` +
+                `&hubDelayMs=150`;
+
+              window.location.href = `/share/map?${qs}`;
+            }}
+          >
+            Share
+          </ToggleButton>
         </div>
 
-        {/* ✅ remove noisy stats; keep only a single helpful line */}
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
-          {fid ? <>FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
+          {fid ? `FID: ${fid}` : "Open inside Warpcast"}
         </div>
 
         {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
-
-        {DEBUG && (
-          <>
-            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>{ctxStatus}</div>
-            {ctxJson && (
-              <pre
-                style={{
-                  marginTop: 8,
-                  fontSize: 10,
-                  maxHeight: 170,
-                  overflow: "auto",
-                  whiteSpace: "pre-wrap",
-                  background: "rgba(255,255,255,0.06)",
-                  padding: 8,
-                  borderRadius: 10,
-                }}
-              >
-                {ctxJson}
-              </pre>
-            )}
-            {stats ? (
-              <pre
-                style={{
-                  marginTop: 8,
-                  fontSize: 10,
-                  maxHeight: 170,
-                  overflow: "auto",
-                  whiteSpace: "pre-wrap",
-                  background: "rgba(255,255,255,0.06)",
-                  padding: 8,
-                  borderRadius: 10,
-                }}
-              >
-                {JSON.stringify(stats, null, 2)}
-              </pre>
-            ) : null}
-          </>
-        )}
       </div>
 
       {/* Loading overlay */}
@@ -275,42 +225,7 @@ export default function HomePage() {
             pointerEvents: "none",
           }}
         >
-          <div
-            style={{
-              width: 340,
-              borderRadius: 16,
-              background: "rgba(0,0,0,0.65)",
-              color: "white",
-              padding: 14,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-            }}
-          >
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <div
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 999,
-                  border: "3px solid rgba(255,255,255,0.25)",
-                  borderTopColor: "white",
-                  animation: "spin 0.9s linear infinite",
-                }}
-              />
-              <div style={{ fontWeight: 700 }}>Loading Far Maps</div>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-              {loadingStage || "Loading…"}
-            </div>
-          </div>
-
-          <style jsx global>{`
-            @keyframes spin {
-              to {
-                transform: rotate(360deg);
-              }
-            }
-          `}</style>
+          <div style={{ color: "white", fontWeight: 700 }}>{loadingStage || "Loading…"}</div>
         </div>
       )}
 
