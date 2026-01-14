@@ -4,7 +4,7 @@ import "leaflet/dist/leaflet.css";
 import { useEffect, useMemo, useState } from "react";
 import type { LatLngExpression } from "leaflet";
 import L from "leaflet";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import { fixLeafletIcons } from "@/lib/leafletFix";
 
 export type PinUser = {
@@ -33,6 +33,11 @@ function escapeHtml(s: string) {
 }
 
 /* ──────────────────────────────────────────────────────────────
+   ✅ Single-world bounds (prevents infinite wrap/repeat world)
+   ────────────────────────────────────────────────────────────── */
+const WORLD_BOUNDS = L.latLngBounds(L.latLng(-85, -180), L.latLng(85, 180));
+
+/* ──────────────────────────────────────────────────────────────
    Icon caches (persist per warm instance)
    ────────────────────────────────────────────────────────────── */
 
@@ -44,12 +49,11 @@ if (!g.__FARMAPS_COUNT_ICON_CACHE__) g.__FARMAPS_COUNT_ICON_CACHE__ = new Map<nu
 const pfpIconCache: Map<string, L.DivIcon> = g.__FARMAPS_PFP_ICON_CACHE__;
 const countIconCache: Map<number, L.DivIcon> = g.__FARMAPS_COUNT_ICON_CACHE__;
 
-const MAX_PFP_ICONS = 5000;   // cap unique pfps cached
-const MAX_COUNT_ICONS = 300;  // cap unique counts cached
+const MAX_PFP_ICONS = 5000; // cap unique pfps cached
+const MAX_COUNT_ICONS = 300; // cap unique counts cached
 
 function pruneMap<K, V>(m: Map<K, V>, max: number) {
   if (m.size <= max) return;
-  // delete oldest inserted keys (Map keeps insertion order)
   const overflow = m.size - max;
   let removed = 0;
   for (const key of m.keys()) {
@@ -143,7 +147,6 @@ function makePfpIcon(pfpUrl: string) {
 }
 
 function getPfpIconCached(pfpUrl: string) {
-  // normalize key a tiny bit (avoid caching empty/whitespace variants)
   const key = pfpUrl.trim();
   const existing = pfpIconCache.get(key);
   if (existing) return existing;
@@ -161,6 +164,26 @@ function pickPinIcon(p: PinPoint) {
   if (u?.pfp_url) return getPfpIconCached(u.pfp_url);
 
   return getCountIconCached(1);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   ✅ Clamp to one world helper
+   ────────────────────────────────────────────────────────────── */
+function ClampToWorld() {
+  const map = useMap();
+
+  useEffect(() => {
+    // Hard clamp panning to one world
+    map.setMaxBounds(WORLD_BOUNDS);
+
+    // If user flings hard, keep them inside
+    map.setMinZoom(2);
+
+    // Make sure Leaflet respects bounds strongly
+    // (maxBoundsViscosity is also set on MapContainer)
+  }, [map]);
+
+  return null;
 }
 
 export default function LeafletMap({
@@ -185,10 +208,26 @@ export default function LeafletMap({
   }, [points]);
 
   return (
-    <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }}>
+    <MapContainer
+      center={center}
+      zoom={zoom}
+      style={{ height: "100%", width: "100%" }}
+      // ✅ These are the important “single world” bits:
+      worldCopyJump={false}
+      maxBounds={WORLD_BOUNDS}
+      maxBoundsViscosity={1.0}
+      minZoom={2}
+      maxZoom={8}
+      // ✅ keep default zoom control position (top-left) — do NOT set zoomControl={false}
+    >
+      <ClampToWorld />
+
       <TileLayer
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attribution="© OpenStreetMap"
+        // ✅ prevent repeated tiles/world wrapping
+        noWrap
+        bounds={WORLD_BOUNDS}
       />
 
       {markerData.map(({ key, p, icon }) => (
@@ -253,12 +292,9 @@ function UserList({ users }: { users: PinUser[] }) {
               />
             )}
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 13, lineHeight: 1.1 }}>
-                @{u.username}
-              </div>
+              <div style={{ fontWeight: 700, fontSize: 13, lineHeight: 1.1 }}>@{u.username}</div>
               <div style={{ fontSize: 11, opacity: 0.75, lineHeight: 1.1 }}>
-                {u.display_name || ""}{" "}
-                <span style={{ opacity: 0.65 }}>• score {u.score.toFixed(2)}</span>
+                {u.display_name || ""} <span style={{ opacity: 0.65 }}>• score {u.score.toFixed(2)}</span>
               </div>
             </div>
           </div>

@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { ComponentType } from "react";
 import type { LatLngExpression } from "leaflet";
-import { useRouter } from "next/navigation";
 import { sdk } from "@farcaster/miniapp-sdk";
 import type { PinPoint } from "@/components/LeafletMap";
 
@@ -50,8 +49,6 @@ const LeafletMap = dynamic(
 }>;
 
 export default function HomePage() {
-  const router = useRouter();
-
   const [fid, setFid] = useState<number | null>(null);
 
   const [points, setPoints] = useState<PinPoint[]>([]);
@@ -67,16 +64,8 @@ export default function HomePage() {
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
-  // Abort in-flight requests (prevents piling up + rate limiting)
+  // Abort in-flight requests
   const abortRef = useRef<AbortController | null>(null);
-
-  // Tunables you want share page to match
-  const limitEach = 800; // per side
-  const maxEach = 5000; // safety cap if you ever switch to "all"
-  const minScore = 0.8;
-  const concurrency = 4;
-  const hubPageSize = 50;
-  const hubDelayMs = 150;
 
   // ─────────────────────────────────────────────
   // Get Farcaster context + FID
@@ -119,7 +108,6 @@ export default function HomePage() {
   useEffect(() => {
     if (!fid) return;
 
-    // cancel any previous request
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -138,9 +126,17 @@ export default function HomePage() {
       );
 
       try {
+        const limitEach = 800;
+        const maxEach = 5000;
+        const minScore = 0.8;
+        const concurrency = 4;
+
+        const hubPageSize = 50;
+        const hubDelayMs = 150;
+
         const url =
           `/api/network?fid=${fid}` +
-          `&mode=${encodeURIComponent(mode)}` +
+          `&mode=${mode}` +
           `&limitEach=${encodeURIComponent(String(limitEach))}` +
           `&maxEach=${encodeURIComponent(String(maxEach))}` +
           `&minScore=${encodeURIComponent(String(minScore))}` +
@@ -172,9 +168,7 @@ export default function HomePage() {
         setPoints(Array.isArray(json.points) ? json.points : []);
         setStats(json as NetworkResponse);
       } catch (e: any) {
-        // Ignore abort errors (toggle spamming)
         if (e?.name === "AbortError") return;
-
         setError(e?.message || "Unknown error");
         setPoints([]);
         setStats(null);
@@ -184,35 +178,13 @@ export default function HomePage() {
       }
     })();
 
-    return () => {
-      controller.abort();
-    };
+    return () => controller.abort();
   }, [fid, mode]);
 
   const center = useMemo<LatLngExpression>(() => {
     if (points.length) return [points[0].lat, points[0].lng];
-    return [39.5, -98.35];
+    return [20, 0];
   }, [points]);
-
-  const pinCount = points.length;
-  const userCount = points.reduce((acc, p) => acc + (p.users?.length || 0), 0);
-
-  function goToSharePage() {
-    if (!fid) return;
-
-    // ✅ IMPORTANT: router.push keeps it INSIDE the miniapp
-    const url =
-      `/share/map?fid=${encodeURIComponent(String(fid))}` +
-      `&mode=${encodeURIComponent(mode)}` +
-      `&minScore=${encodeURIComponent(String(minScore))}` +
-      `&limitEach=${encodeURIComponent(String(limitEach))}` +
-      `&maxEach=${encodeURIComponent(String(maxEach))}` +
-      `&concurrency=${encodeURIComponent(String(concurrency))}` +
-      `&hubPageSize=${encodeURIComponent(String(hubPageSize))}` +
-      `&hubDelayMs=${encodeURIComponent(String(hubDelayMs))}`;
-
-    router.push(url);
-  }
 
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
@@ -222,17 +194,15 @@ export default function HomePage() {
           position: "absolute",
           zIndex: 1000,
           top: 12,
-          left: 12,
+          left: 56, // ✅ shift right so zoom +/- won't cover it
           padding: 10,
           borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: 440,
+          maxWidth: 420,
         }}
       >
         <div style={{ fontWeight: 700 }}>{process.env.NEXT_PUBLIC_APP_NAME || "Far Maps"}</div>
-
-        <div style={{ fontSize: 12, opacity: 0.9 }}>Followers + Following by location</div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
@@ -244,29 +214,12 @@ export default function HomePage() {
           <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
             Both
           </ToggleButton>
-
-          {/* ✅ Share page button (IN-APP) */}
-          <ToggleButton active={false} onClick={goToSharePage}>
-            Share
-          </ToggleButton>
         </div>
 
-        <div style={{ marginTop: 8, fontSize: 12 }}>
+        {/* ✅ remove noisy stats; keep only a single helpful line */}
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
           {fid ? <>FID: {fid}</> : <>Open inside Warpcast to load your network.</>}
         </div>
-
-        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-          {fid ? `Mode: ${mode} • Pins: ${pinCount} • Users: ${userCount}` : "No FID"}
-        </div>
-
-        {stats ? (
-          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-            Hub: followers {stats.followersCount} • following {stats.followingCount} • hydrated{" "}
-            {stats.hydrated} • score&gt;{stats.minScore} {stats.scoredOk} • loc {stats.withLocation}
-          </div>
-        ) : null}
-
-        <div style={{ marginTop: 6, fontSize: 12 }}>{loading ? "Loading…" : `Pins: ${pinCount}`}</div>
 
         {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
 
@@ -289,6 +242,22 @@ export default function HomePage() {
                 {ctxJson}
               </pre>
             )}
+            {stats ? (
+              <pre
+                style={{
+                  marginTop: 8,
+                  fontSize: 10,
+                  maxHeight: 170,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  background: "rgba(255,255,255,0.06)",
+                  padding: 8,
+                  borderRadius: 10,
+                }}
+              >
+                {JSON.stringify(stats, null, 2)}
+              </pre>
+            ) : null}
           </>
         )}
       </div>
@@ -330,7 +299,9 @@ export default function HomePage() {
               <div style={{ fontWeight: 700 }}>Loading Far Maps</div>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{loadingStage || "Loading…"}</div>
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+              {loadingStage || "Loading…"}
+            </div>
           </div>
 
           <style jsx global>{`
@@ -345,7 +316,7 @@ export default function HomePage() {
 
       {/* Map */}
       <div style={{ height: "100%", width: "100%" }}>
-        <LeafletMap center={center} zoom={points.length ? 3 : 4} points={points} />
+        <LeafletMap center={center} zoom={points.length ? 3 : 2} points={points} />
       </div>
     </main>
   );
