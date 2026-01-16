@@ -413,13 +413,33 @@ export async function GET(req: Request) {
 </body>
 </html>`;
 
-    const executablePath = await chromium.executablePath();
-    const browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: { width: w, height: h },
-      executablePath,
-      headless: true,
-    });
+    const isProd = process.env.NODE_ENV === "production";
+
+    // ✅ Use Sparticuz Chromium on Vercel (prod), but local Chrome on Windows dev
+    const browser = await puppeteer.launch(
+      isProd
+        ? {
+            args: chromium.args,
+            defaultViewport: { width: w, height: h },
+            executablePath: await chromium.executablePath(),
+            headless: true,
+          }
+        : {
+            // local dev
+            headless: true,
+            defaultViewport: { width: w, height: h },
+            executablePath:
+              process.env.CHROME_PATH ||
+              "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            args: [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-gpu",
+            ],
+          }
+    );
+
 
     try {
       const page = await browser.newPage();
