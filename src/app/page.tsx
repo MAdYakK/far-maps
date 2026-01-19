@@ -112,7 +112,7 @@ export default function HomePage() {
       );
 
       try {
-        const limitEach = 1000;
+        const limitEach = 1500;
         const maxEach = 5000;
         const minScore = 0.8;
         const concurrency = 4;
