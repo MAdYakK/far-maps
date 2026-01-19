@@ -176,7 +176,9 @@ async function neynarUserBulk(fids: number[]): Promise<NeynarBulkResp> {
     return json as NeynarBulkResp;
   } catch (e: any) {
     const cause = e?.name === "AbortError" ? "timeout" : e?.message || String(e);
-    throw new Error(`[Neynar] fetch failed (${cause})`);
+    console.warn("[Neynar] hydrate skipped:", cause);
+    return { users: [] };
+
   } finally {
     clearTimeout(t);
   }
