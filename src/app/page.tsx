@@ -129,7 +129,7 @@ export default function HomePage() {
           `&hubPageSize=${hubPageSize}` +
           `&hubDelayMs=${hubDelayMs}`;
 
-        const res = await fetch(url, { cache: "no-store", signal: controller.signal });
+        const res = await fetch(url, { signal: controller.signal });
         const text = await res.text();
         const json = text ? JSON.parse(text) : null;
 

@@ -1,7 +1,9 @@
+// src/app/api/network/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { getNetworkFidsFromHub } from "@/lib/hub";
+import { getRedis } from "@/lib/redis";
 
 type Mode = "followers" | "following" | "both";
 
@@ -83,12 +85,30 @@ function roundCoord(n: number, decimals = 2) {
 }
 
 /* ──────────────────────────────────────────────────────────────
-   In-memory caches (best effort; persists per warm instance)
+   L1 caches (in-memory) + L2 caches (Redis)
+   Store only minimal user fields in caches to save a lot of space.
    ────────────────────────────────────────────────────────────── */
 
+type MiniUser = {
+  fid: number;
+  username: string;
+  display_name?: string;
+  pfp_url?: string;
+
+  // Resolved score (null if missing)
+  score: number | null;
+
+  // coords as int(*100) to save space (represents lat/lng rounded to 2 decimals)
+  latE2?: number;
+  lngE2?: number;
+
+  city?: string; // only when location present (or keep undefined)
+  updatedAt: number; // ms
+};
+
 type CachedUser = {
-  user: NeynarBulkResp["users"][number];
-  ts: number; // cached at
+  user: MiniUser;
+  ts: number; // cached at (ms)
 };
 
 type CachedNetwork = {
@@ -97,13 +117,17 @@ type CachedNetwork = {
   ts: number;
 };
 
-// Make caches survive hot reloads/dev and share across requests in same process
 const g = globalThis as any;
 
+// L1 TTLs (warm instance)
 const USER_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const NETWORK_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
-const MAX_USER_CACHE = 50_000; // adjust if needed
+// L2 TTLs (Redis)
+const USER_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+const NETWORK_TTL_SECONDS = 10 * 60; // 10 minutes
+
+const MAX_USER_CACHE = 50_000;
 const MAX_NETWORK_CACHE = 2_000;
 
 if (!g.__FARMAPS_USER_CACHE__) g.__FARMAPS_USER_CACHE__ = new Map<number, CachedUser>();
@@ -116,7 +140,6 @@ function isFresh(ts: number, ttl: number) {
   return Date.now() - ts <= ttl;
 }
 
-// Very simple pruning to keep memory bounded
 function pruneCache<K, V extends { ts: number }>(m: Map<K, V>, maxSize: number) {
   if (m.size <= maxSize) return;
   const target = Math.max(1, Math.floor(maxSize * 0.1));
@@ -134,8 +157,122 @@ function getNetworkCacheKey(args: {
   maxEach: number;
   hubPageSize: number;
   hubDelayMs: number;
+  minScore: number;
+  concurrency: number;
 }) {
-  return `${args.fid}|${args.mode}|limitEach=${args.limitEachRaw}|maxEach=${args.maxEach}|pageSize=${args.hubPageSize}|delay=${args.hubDelayMs}`;
+  // include the things that materially change the result
+  return [
+    `fid=${args.fid}`,
+    `mode=${args.mode}`,
+    `limitEach=${args.limitEachRaw}`,
+    `maxEach=${args.maxEach}`,
+    `hubPageSize=${args.hubPageSize}`,
+    `hubDelayMs=${args.hubDelayMs}`,
+    `minScore=${args.minScore}`,
+    `conc=${args.concurrency}`,
+  ].join("|");
+}
+
+// Shorter keys save memory at scale
+function redisNetKey(k: string) {
+  return `fn1:${k}`;
+}
+function redisUserKey(fid: number) {
+  return `fu1:${fid}`;
+}
+
+async function redisGetJson<T>(key: string): Promise<T | null> {
+  try {
+    const r = await getRedis();
+    const s = await r.get(key);
+    if (!s) return null;
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function redisSetJson(key: string, value: any, ttlSeconds: number) {
+  try {
+    const r = await getRedis();
+    await r.setEx(key, ttlSeconds, JSON.stringify(value));
+  } catch {
+    // ignore Redis errors (app should still work)
+  }
+}
+
+async function redisMGetUsers(fids: number[]) {
+  const out = new Map<number, CachedUser>();
+  if (!fids.length) return out;
+
+  try {
+    const r = await getRedis();
+    const keys = fids.map((fid) => redisUserKey(fid));
+    const vals = await r.mGet(keys);
+
+    const now = Date.now();
+    for (let i = 0; i < fids.length; i++) {
+      const raw = vals[i];
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as CachedUser;
+        if (parsed && parsed.user && typeof parsed.user.fid === "number") {
+          out.set(fids[i], { user: parsed.user, ts: now });
+        }
+      } catch {
+        // ignore bad JSON
+      }
+    }
+  } catch {
+    // ignore Redis errors
+  }
+
+  return out;
+}
+
+function toE2(n: number) {
+  return Math.round(n * 100);
+}
+function fromE2(n: number) {
+  return n / 100;
+}
+
+function toMiniUser(u: NeynarBulkResp["users"][number], now: number): MiniUser | null {
+  if (typeof u?.fid !== "number" || !Number.isFinite(u.fid)) return null;
+
+  const score = getUserScore(u); // number | null
+
+  const lat0 = u.profile?.location?.latitude;
+  const lng0 = u.profile?.location?.longitude;
+
+  const hasLoc =
+    typeof lat0 === "number" &&
+    typeof lng0 === "number" &&
+    Number.isFinite(lat0) &&
+    Number.isFinite(lng0) &&
+    lat0 >= -90 &&
+    lat0 <= 90 &&
+    lng0 >= -180 &&
+    lng0 <= 180;
+
+  const mini: MiniUser = {
+    fid: u.fid,
+    username: u.username,
+    display_name: u.display_name,
+    pfp_url: u.pfp_url,
+    score,
+    updatedAt: now,
+  };
+
+  if (hasLoc) {
+    const lat = roundCoord(lat0, 2);
+    const lng = roundCoord(lng0, 2);
+    mini.latE2 = toE2(lat);
+    mini.lngE2 = toE2(lng);
+    mini.city = formatCity(u);
+  }
+
+  return mini;
 }
 
 async function neynarUserBulk(fids: number[]): Promise<NeynarBulkResp> {
@@ -178,7 +315,6 @@ async function neynarUserBulk(fids: number[]): Promise<NeynarBulkResp> {
     const cause = e?.name === "AbortError" ? "timeout" : e?.message || String(e);
     console.warn("[Neynar] hydrate skipped:", cause);
     return { users: [] };
-
   } finally {
     clearTimeout(t);
   }
@@ -231,28 +367,49 @@ async function hydrateUsersCached(
   fids: number[],
   concurrency: number
 ): Promise<{
-  users: NeynarBulkResp["users"];
-  cacheHits: number;
+  users: MiniUser[];
+  cacheHits: number; // L1 hits
+  redisHits: number; // L2 hits
   fetchedCount: number;
   requested: number;
 }> {
   const now = Date.now();
-  const freshUsers: NeynarBulkResp["users"] = [];
-  const missing: number[] = [];
+
+  const freshUsers: MiniUser[] = [];
+  const missingL1: number[] = [];
 
   let cacheHits = 0;
 
+  // 1) L1 (memory)
   for (const fid of fids) {
     const c = userCache.get(fid);
     if (c && isFresh(c.ts, USER_TTL_MS)) {
       freshUsers.push(c.user);
       cacheHits++;
     } else {
+      missingL1.push(fid);
+    }
+  }
+
+  // 2) L2 (Redis) for the ones not in L1
+  const fromRedis = await redisMGetUsers(missingL1);
+  let redisHits = 0;
+  const missing: number[] = [];
+
+  for (const fid of missingL1) {
+    const c = fromRedis.get(fid);
+    if (c) {
+      userCache.set(fid, c);
+      redisHits++;
+    } else {
       missing.push(fid);
     }
   }
 
-  let fetchedUsers: NeynarBulkResp["users"] = [];
+  pruneCache(userCache, MAX_USER_CACHE);
+
+  // 3) Fetch remaining from Neynar
+  let fetchedMini: MiniUser[] = [];
   if (missing.length) {
     const batches = chunk(missing, 100);
 
@@ -260,28 +417,40 @@ async function hydrateUsersCached(
       return await neynarBulkWithRetry(b, 5);
     });
 
+    const fetchedRaw: NeynarBulkResp["users"] = [];
     for (const r of bulkResults) {
       const list = Array.isArray(r.users) ? r.users : [];
-      fetchedUsers.push(...list);
+      fetchedRaw.push(...list);
     }
 
-    for (const u of fetchedUsers) {
-      if (typeof u?.fid === "number") {
-        userCache.set(u.fid, { user: u, ts: now });
-      }
+    // Transform -> minimal record and write to L1 + L2
+    for (const u of fetchedRaw) {
+      const mini = toMiniUser(u, now);
+      if (!mini) continue;
+
+      fetchedMini.push(mini);
+
+      const cached: CachedUser = { user: mini, ts: now };
+      userCache.set(mini.fid, cached);
+
+      // fire-and-forget (don’t await each one)
+      void redisSetJson(redisUserKey(mini.fid), cached, USER_TTL_SECONDS);
     }
 
     pruneCache(userCache, MAX_USER_CACHE);
   }
 
-  const byFid = new Map<number, NeynarBulkResp["users"][number]>();
+  // Merge L1 + L2 + fetched (dedupe)
+  const byFid = new Map<number, MiniUser>();
   for (const u of freshUsers) byFid.set(u.fid, u);
-  for (const u of fetchedUsers) byFid.set(u.fid, u);
+  for (const c of fromRedis.values()) byFid.set(c.user.fid, c.user);
+  for (const u of fetchedMini) byFid.set(u.fid, u);
 
   return {
     users: Array.from(byFid.values()),
     cacheHits,
-    fetchedCount: fetchedUsers.length,
+    redisHits,
+    fetchedCount: fetchedMini.length,
     requested: fids.length,
   };
 }
@@ -317,40 +486,67 @@ export async function GET(req: Request) {
       ? Math.min(Math.max(concurrencyParam, 1), 8)
       : 4;
 
-    // Hub pacing passthrough (used inside lib/hub if you add it there later)
     const hubPageSize = Math.min(Math.max(Number(searchParams.get("hubPageSize") || "50"), 10), 200);
     const hubDelayMs = Math.min(Math.max(Number(searchParams.get("hubDelayMs") || "150"), 0), 2000);
 
     const includeFollowers = mode === "followers" || mode === "both";
     const includeFollowing = mode === "following" || mode === "both";
 
-    const cacheKey = getNetworkCacheKey({ fid, mode, limitEachRaw, maxEach, hubPageSize, hubDelayMs });
+    // ── Network cache key includes parameters that affect output ──
+    const cacheKey = getNetworkCacheKey({
+      fid,
+      mode,
+      limitEachRaw,
+      maxEach,
+      hubPageSize,
+      hubDelayMs,
+      minScore,
+      concurrency,
+    });
+
+    // ── L1 network cache first ──
     const cachedNet = networkCache.get(cacheKey);
 
     let followers: number[] = [];
     let following: number[] = [];
     let networkCacheHit = false;
+    let networkRedisHit = false;
 
     if (cachedNet && isFresh(cachedNet.ts, NETWORK_TTL_MS)) {
       followers = cachedNet.followers;
       following = cachedNet.following;
       networkCacheHit = true;
     } else {
-      const net = await getNetworkFidsFromHub(fid, {
-        includeFollowers,
-        includeFollowing,
-        limitEach: limitEach as any,
-        maxEach,
-        // (optional) if you later add these into lib/hub:
-        // hubPageSize,
-        // hubDelayMs,
-      });
+      // ── L2 network cache (Redis) ──
+      const redisNet = await redisGetJson<CachedNetwork>(redisNetKey(cacheKey));
+      if (redisNet?.followers && redisNet?.following) {
+        followers = redisNet.followers;
+        following = redisNet.following;
+        networkRedisHit = true;
 
-      followers = net.followers;
-      following = net.following;
+        // warm L1
+        networkCache.set(cacheKey, { followers, following, ts: Date.now() });
+        pruneCache(networkCache, MAX_NETWORK_CACHE);
+      } else {
+        // ── Hub fetch ──
+        const net = await getNetworkFidsFromHub(fid, {
+          includeFollowers,
+          includeFollowing,
+          limitEach: limitEach as any,
+          maxEach,
+        });
 
-      networkCache.set(cacheKey, { followers, following, ts: Date.now() });
-      pruneCache(networkCache, MAX_NETWORK_CACHE);
+        followers = net.followers;
+        following = net.following;
+
+        const entry: CachedNetwork = { followers, following, ts: Date.now() };
+
+        networkCache.set(cacheKey, entry);
+        pruneCache(networkCache, MAX_NETWORK_CACHE);
+
+        // write to Redis
+        await redisSetJson(redisNetKey(cacheKey), entry, NETWORK_TTL_SECONDS);
+      }
     }
 
     const merged = Array.from(new Set([fid, ...followers, ...following]));
@@ -358,7 +554,6 @@ export async function GET(req: Request) {
     const hydrate = await hydrateUsersCached(merged, concurrency);
     const allUsers = hydrate.users;
 
-    // viewer info for watermarking
     const viewerUser = allUsers.find((u) => u.fid === fid);
     const viewer = viewerUser
       ? {
@@ -376,7 +571,7 @@ export async function GET(req: Request) {
     const grouped = new Map<string, PinPoint>();
 
     for (const u of allUsers) {
-      const score = getUserScore(u);
+      const score = u.score;
       if (score === null) {
         missingScore++;
         continue;
@@ -384,20 +579,15 @@ export async function GET(req: Request) {
       if (score <= minScore) continue;
       scoredOk++;
 
-      const lat0 = u.profile?.location?.latitude;
-      const lng0 = u.profile?.location?.longitude;
-      if (typeof lat0 !== "number" || typeof lng0 !== "number") continue;
-
-      if (!Number.isFinite(lat0) || !Number.isFinite(lng0)) continue;
-      if (lat0 < -90 || lat0 > 90 || lng0 < -180 || lng0 > 180) continue;
+      if (typeof u.latE2 !== "number" || typeof u.lngE2 !== "number") continue;
 
       withLocation++;
 
-      const lat = roundCoord(lat0, 2);
-      const lng = roundCoord(lng0, 2);
+      const lat = fromE2(u.latE2);
+      const lng = fromE2(u.lngE2);
       const key = `${lat},${lng}`;
 
-      const city = formatCity(u);
+      const city = u.city || "Unknown";
 
       const user: PinUser = {
         fid: u.fid,
@@ -409,13 +599,7 @@ export async function GET(req: Request) {
 
       const existing = grouped.get(key);
       if (!existing) {
-        grouped.set(key, {
-          lat,
-          lng,
-          city,
-          count: 1,
-          users: [user],
-        });
+        grouped.set(key, { lat, lng, city, count: 1, users: [user] });
       } else {
         existing.count += 1;
         existing.users.push(user);
@@ -428,43 +612,55 @@ export async function GET(req: Request) {
       return a.city.localeCompare(b.city);
     });
 
-    return NextResponse.json({
-      fid,
-      mode,
-      minScore,
-      limitEach: limitEachRaw,
-      maxEach,
-      concurrency,
-      hubPageSize,
-      hubDelayMs,
+    return NextResponse.json(
+      {
+        fid,
+        mode,
+        minScore,
+        limitEach: limitEachRaw,
+        maxEach,
+        concurrency,
+        hubPageSize,
+        hubDelayMs,
 
-      viewer,
+        viewer,
 
-      followersCount: followers.length,
-      followingCount: following.length,
-      hydrated: allUsers.length,
-      scoredOk,
-      missingScore,
-      withLocation,
-      count: points.length,
+        followersCount: followers.length,
+        followingCount: following.length,
+        hydrated: allUsers.length,
+        scoredOk,
+        missingScore,
+        withLocation,
+        count: points.length,
 
-      cache: {
-        network: {
-          hit: networkCacheHit,
-          ttlMs: NETWORK_TTL_MS,
-          size: networkCache.size,
+        cache: {
+          network: {
+            hitL1: networkCacheHit,
+            hitRedis: networkRedisHit,
+            ttlMs: NETWORK_TTL_MS,
+            ttlSecondsRedis: NETWORK_TTL_SECONDS,
+            size: networkCache.size,
+          },
+          users: {
+            requested: hydrate.requested,
+            cacheHitsL1: hydrate.cacheHits,
+            cacheHitsRedis: hydrate.redisHits,
+            fetchedCount: hydrate.fetchedCount,
+            ttlMs: USER_TTL_MS,
+            ttlSecondsRedis: USER_TTL_SECONDS,
+            size: userCache.size,
+          },
         },
-        users: {
-          requested: hydrate.requested,
-          cacheHits: hydrate.cacheHits,
-          fetchedCount: hydrate.fetchedCount,
-          ttlMs: USER_TTL_MS,
-          size: userCache.size,
-        },
+
+        points,
       },
-
-      points,
-    });
+      {
+        // CDN caching helps too (doesn't replace Redis)
+        headers: {
+          "Cache-Control": "s-maxage=60, stale-while-revalidate=600",
+        },
+      }
+    );
   } catch (e: any) {
     console.error("api/network error:", e);
     return NextResponse.json({ error: e?.message || "Server error" }, { status: 500 });
