@@ -4,6 +4,57 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { sdk } from "@farcaster/miniapp-sdk";
 
+import { createPublicClient, createWalletClient, custom } from "viem";
+import { base } from "viem/chains";
+import { erc20Abi } from "viem";
+
+// ─────────────────────────────────────────────
+// CONFIG — set these to your deployed values
+// ─────────────────────────────────────────────
+const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
+
+// Base USDC (6 decimals)
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
+
+// FarMapsMint ABI (only what we need)
+const farMapsMintAbi = [
+  {
+    type: "function",
+    name: "mintPrice",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "mintWithVoucher",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "v",
+        type: "tuple",
+        components: [
+          { name: "to", type: "address" },
+          { name: "tokenURI", type: "string" },
+          { name: "price", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [{ name: "tokenId", type: "uint256" }],
+  },
+  // ✅ for "already minted?" check
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "owner", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
 type Mode = "followers" | "following" | "both";
 
 function getBaseUrl() {
@@ -13,10 +64,40 @@ function getBaseUrl() {
   return "";
 }
 
+type PrepareResp = {
+  ok: true;
+  fid: number;
+  username?: string;
+  imageUrl: string;
+  tokenUri: string;
+  imgTx: string;
+  metaTx: string;
+  imageUrls?: Record<string, string>;
+  tokenUriUrls?: Record<string, string>;
+};
+
+type VoucherResp = {
+  ok: true;
+  voucher: {
+    to: `0x${string}`;
+    tokenURI: string;
+    price: string; // uint256 as string
+    nonce: string; // uint256 as string
+    deadline: string; // uint256 as string
+  };
+  signature: `0x${string}`;
+};
+
+function shortAddr(a?: string) {
+  if (!a) return "";
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
 export default function ShareMapPage() {
   const router = useRouter();
 
   const [fid, setFid] = useState<number | null>(null);
+  const [username, setUsername] = useState<string | undefined>(undefined);
   const [mode, setMode] = useState<Mode>("both");
 
   const [minScore, setMinScore] = useState("0.8");
@@ -31,7 +112,17 @@ export default function ShareMapPage() {
   const [sharing, setSharing] = useState(false);
 
   const [loadingImg, setLoadingImg] = useState(true);
-  const [reloadNonce, setReloadNonce] = useState<number>(() => Date.now());
+  const [reloadNonce] = useState<number>(() => Date.now()); // no reload button now
+
+  // Mint UI
+  const [minting, setMinting] = useState(false);
+  const [mintStage, setMintStage] = useState<string>("");
+  const [mintErr, setMintErr] = useState<string>("");
+  const [mintedTokenUri, setMintedTokenUri] = useState<string>("");
+  const [mintedImageUrl, setMintedImageUrl] = useState<string>("");
+
+  // ✅ Already minted overlay
+  const [alreadyMintedOpen, setAlreadyMintedOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -57,10 +148,21 @@ export default function ShareMapPage() {
       try {
         await sdk.actions.ready();
         const ctx = await sdk.context;
+
         const detectedFid =
           ((ctx as any)?.viewer?.fid as number | undefined) ??
           ((ctx as any)?.user?.fid as number | undefined);
+
+        const detectedUsername =
+          (ctx as any)?.viewer?.username ??
+          (ctx as any)?.user?.username ??
+          (ctx as any)?.viewer?.user?.username ??
+          (ctx as any)?.user?.user?.username;
+
         if (detectedFid) setFid(detectedFid);
+        if (typeof detectedUsername === "string" && detectedUsername.trim()) {
+          setUsername(detectedUsername.trim());
+        }
       } catch {
         // ignore
       }
@@ -86,9 +188,9 @@ export default function ShareMapPage() {
 
   const imageAbsolute = useMemo(() => {
     if (!fid) return "";
-    const base = getBaseUrl();
-    if (!base) return "";
-    return `${base}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
+    const baseUrl = getBaseUrl();
+    if (!baseUrl) return "";
+    return `${baseUrl}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
   }, [fid, imageSrc]);
 
   async function shareCast() {
@@ -98,10 +200,7 @@ export default function ShareMapPage() {
       setSharing(true);
       await sdk.actions.composeCast({
         text: "My Farmap! Check out yours!",
-        embeds: [
-          imageAbsolute,
-          "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps", // ✅ include the miniapp embed too
-        ],
+        embeds: [imageAbsolute, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
       });
     } catch (e: any) {
       setImgErr(e?.message || "Failed to share");
@@ -110,11 +209,151 @@ export default function ShareMapPage() {
     }
   }
 
-  function reloadImage() {
-    setLoadingImg(true);
-    setImgOk(null);
-    setImgErr("");
-    setReloadNonce(Date.now());
+  async function mintNow() {
+    if (!fid) return;
+
+    setMintErr("");
+    setMintStage("");
+    setMintedTokenUri("");
+    setMintedImageUrl("");
+
+    try {
+      setMinting(true);
+      setMintStage("Connecting wallet…");
+
+      // 1) Wallet provider
+      const ethProvider = await sdk.wallet.getEthereumProvider();
+
+      const walletClient = createWalletClient({
+        chain: base,
+        transport: custom(ethProvider as any),
+      });
+
+      // ✅ use injected provider for reads too
+      const publicClient = createPublicClient({
+        chain: base,
+        transport: custom(ethProvider as any),
+      });
+
+      const [account] = await walletClient.getAddresses();
+      if (!account) throw new Error("No wallet connected");
+
+      // ✅ 1 mint per wallet: check onchain balance
+      setMintStage("Checking mint status…");
+      const bal = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: farMapsMintAbi,
+        functionName: "balanceOf",
+        args: [account],
+      });
+
+      // ✅ FIX: no BigInt literal (0n)
+      if (bal > BigInt(0)) {
+        setMintStage("");
+        setAlreadyMintedOpen(true);
+        return;
+      }
+
+      // 2) Prepare (upload png + metadata)
+      setMintStage("Preparing metadata…");
+      const prepRes = await fetch("/api/mint/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ fid, username }),
+      });
+
+      const prepText = await prepRes.text();
+      const prepJson = prepText ? (JSON.parse(prepText) as PrepareResp) : null;
+      if (!prepRes.ok || !prepJson?.ok) {
+        throw new Error(prepJson ? JSON.stringify(prepJson) : "Prepare failed");
+      }
+
+      const tokenUri = prepJson.tokenUri;
+      const imgUrl = prepJson.imageUrl;
+
+      // 3) Voucher
+      setMintStage("Fetching voucher…");
+      const vRes = await fetch("/api/mint/voucher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ to: account, tokenUri }),
+      });
+
+      const vText = await vRes.text();
+      const vJson = vText ? (JSON.parse(vText) as VoucherResp) : null;
+      if (!vRes.ok || !vJson?.ok) {
+        throw new Error(vJson ? JSON.stringify(vJson) : "Voucher failed");
+      }
+
+      // 4) Approve EXACTLY 1 mint (just mintPrice)
+      setMintStage("Approving USDC…");
+      const onchainPrice = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: farMapsMintAbi,
+        functionName: "mintPrice",
+      });
+
+      const allowance = await publicClient.readContract({
+        address: USDC_ADDRESS,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [account, CONTRACT_ADDRESS],
+      });
+
+      if (allowance < onchainPrice) {
+        const approveHash = await walletClient.writeContract({
+          address: USDC_ADDRESS,
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [CONTRACT_ADDRESS, onchainPrice],
+          account,
+        });
+
+        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+      }
+
+      // 5) Mint
+      setMintStage("Minting…");
+      const hash = await walletClient.writeContract({
+        address: CONTRACT_ADDRESS,
+        abi: farMapsMintAbi,
+        functionName: "mintWithVoucher",
+        args: [
+          {
+            to: vJson.voucher.to,
+            tokenURI: vJson.voucher.tokenURI,
+            price: BigInt(vJson.voucher.price),
+            nonce: BigInt(vJson.voucher.nonce),
+            deadline: BigInt(vJson.voucher.deadline),
+          },
+          vJson.signature,
+        ],
+        account,
+      });
+
+      await publicClient.waitForTransactionReceipt({ hash });
+
+      setMintedTokenUri(tokenUri);
+      setMintedImageUrl(imgUrl);
+      setMintStage(`Minted! Tx ${shortAddr(hash)}`);
+
+      // 6) Optional: auto-share minted image
+      try {
+        await sdk.actions.composeCast({
+          text: "I minted my Farmap 🗺️",
+          embeds: [imgUrl, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
+        });
+      } catch {
+        // ignore
+      }
+    } catch (e: any) {
+      setMintErr(e?.message || "Mint failed");
+      setMintStage("");
+    } finally {
+      setMinting(false);
+    }
   }
 
   return (
@@ -146,30 +385,49 @@ export default function ShareMapPage() {
         >
           <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
 
-          <BubbleButton onClick={reloadImage} disabled={!fid || sharing}>
-            Reload
+          <BubbleButton
+            onClick={mintNow}
+            disabled={!fid || minting || sharing || imgOk === false || loadingImg}
+          >
+            {minting ? "Minting…" : "Mint"}
           </BubbleButton>
 
-          <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing}>
+          <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing || minting}>
             {sharing ? "Sharing…" : "Share"}
           </BubbleButton>
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
             {fid ? `FID ${fid} • ${mode}` : "Loading…"}
           </div>
+
+          {mintStage ? (
+            <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>
+              {mintStage}
+            </div>
+          ) : null}
+
+          {mintErr ? (
+            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>
+              {mintErr}
+            </div>
+          ) : null}
+
+          {mintedTokenUri ? (
+            <div style={{ width: "100%", fontSize: 12, opacity: 0.9, marginTop: 4 }}>
+              TokenURI: {mintedTokenUri}
+              {mintedImageUrl ? (
+                <>
+                  <br />
+                  Image: {mintedImageUrl}
+                </>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
 
       {/* Image area */}
-      <div
-        style={{
-          flex: 1,
-          display: "grid",
-          placeItems: "center",
-          padding: 16,
-        }}
-      >
-        {/* IMPORTANT: no extra inner padding/frame; let the PNG fill */}
+      <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 16 }}>
         <div
           style={{
             width: "min(92vw, 560px)",
@@ -214,52 +472,20 @@ export default function ShareMapPage() {
 
               {/* Loading overlay */}
               {loadingImg && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    zIndex: 20,
-                    background: "rgba(0,0,0,0.35)",
-                    display: "grid",
-                    placeItems: "center",
-                    pointerEvents: "none",
+                <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />
+              )}
+
+              {/* Already minted overlay */}
+              {alreadyMintedOpen && (
+                <OverlayCard
+                  title="Already minted."
+                  subtitle="Click to share"
+                  onClose={() => setAlreadyMintedOpen(false)}
+                  onClick={() => {
+                    setAlreadyMintedOpen(false);
+                    void shareCast();
                   }}
-                >
-                  <div
-                    style={{
-                      width: 320,
-                      borderRadius: 16,
-                      background: "rgba(0,0,0,0.65)",
-                      color: "white",
-                      padding: 14,
-                      boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-                    }}
-                  >
-                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                      <div
-                        style={{
-                          width: 18,
-                          height: 18,
-                          borderRadius: 999,
-                          border: "3px solid rgba(255,255,255,0.25)",
-                          borderTopColor: "white",
-                          animation: "spin 0.9s linear infinite",
-                        }}
-                      />
-                      <div style={{ fontWeight: 800 }}>Loading Farmap</div>
-                    </div>
-
-                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>Loading map image…</div>
-                  </div>
-
-                  <style jsx global>{`
-                    @keyframes spin {
-                      to {
-                        transform: rotate(360deg);
-                      }
-                    }
-                  `}</style>
-                </div>
+                />
               )}
 
               {/* Error overlay */}
@@ -281,7 +507,7 @@ export default function ShareMapPage() {
                   <div>
                     <div style={{ fontSize: 14 }}>{imgErr}</div>
                     <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, opacity: 0.9 }}>
-                      Try Reload (Pinata hub / Neynar can rate-limit).
+                      Try again in a moment (hub/Neynar can rate-limit).
                     </div>
                   </div>
                 </div>
@@ -322,5 +548,102 @@ function BubbleButton({
     >
       {children}
     </button>
+  );
+}
+
+// Reusable overlay card styled like your loading overlay
+function OverlayCard({
+  title,
+  subtitle,
+  onClick,
+  onClose,
+}: {
+  title: string;
+  subtitle?: string;
+  onClick?: (() => void) | undefined;
+  onClose?: (() => void) | undefined;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 50,
+        background: "rgba(0,0,0,0.35)",
+        display: "grid",
+        placeItems: "center",
+        padding: 14,
+        cursor: onClick ? "pointer" : "default",
+      }}
+      onClick={() => {
+        if (onClick) onClick();
+      }}
+    >
+      <div
+        style={{
+          width: 320,
+          borderRadius: 16,
+          background: "rgba(0,0,0,0.65)",
+          color: "white",
+          padding: 14,
+          boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+          position: "relative",
+          pointerEvents: "none", // ✅ allows overlay click to work
+        }}
+      >
+        {onClose ? (
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            style={{
+              position: "absolute",
+              top: 10,
+              right: 10,
+              width: 26,
+              height: 26,
+              borderRadius: 999,
+              border: "1px solid rgba(255,255,255,0.25)",
+              background: "rgba(255,255,255,0.10)",
+              color: "white",
+              cursor: "pointer",
+              lineHeight: "24px",
+              fontWeight: 800,
+              pointerEvents: "auto", // ✅ button still clickable
+            }}
+          >
+            ×
+          </button>
+        ) : null}
+
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <div
+            style={{
+              width: 18,
+              height: 18,
+              borderRadius: 999,
+              border: "3px solid rgba(255,255,255,0.25)",
+              borderTopColor: "white",
+              animation: "spin 0.9s linear infinite",
+              opacity: onClick ? 0.0 : 1, // spinner hidden for clickable overlays
+            }}
+          />
+          <div style={{ fontWeight: 800 }}>{title}</div>
+        </div>
+
+        {subtitle ? <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>{subtitle}</div> : null}
+
+        <style jsx global>{`
+          @keyframes spin {
+            to {
+              transform: rotate(360deg);
+            }
+          }
+        `}</style>
+      </div>
+    </div>
   );
 }

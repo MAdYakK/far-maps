@@ -17,10 +17,10 @@ function mustEnv(name: string) {
 
 // Creates/returns a singleton Redis client (safe-ish for serverless)
 export async function getRedis(): Promise<RedisClient> {
-  // If we already have a connected client, return it.
+  // Already connected
   if (global.__farmapsRedis) return global.__farmapsRedis;
 
-  // If a connect is already in-flight, await it (prevents stampede).
+  // Connect in-flight
   if (global.__farmapsRedisConnecting) return global.__farmapsRedisConnecting;
 
   const url = mustEnv("REDIS_URL");
@@ -28,7 +28,11 @@ export async function getRedis(): Promise<RedisClient> {
   const client = createClient({
     url,
     socket: {
-      reconnectStrategy: (retries) => Math.min(1000 * 2 ** retries, 8000),
+      reconnectStrategy: (retries) => {
+        // stop retrying after a while
+        if (retries > 10) return new Error("Redis reconnect retries exhausted");
+        return Math.min(250 * 2 ** retries, 8000);
+      },
     },
   });
 
@@ -37,10 +41,18 @@ export async function getRedis(): Promise<RedisClient> {
   });
 
   global.__farmapsRedisConnecting = (async () => {
-    await client.connect();
-    global.__farmapsRedis = client;
-    global.__farmapsRedisConnecting = undefined;
-    return client;
+    try {
+      await client.connect();
+
+      // Optional: sanity check connection
+      await client.ping();
+
+      global.__farmapsRedis = client;
+      return client;
+    } finally {
+      // Always clear in-flight marker (even if connect fails)
+      global.__farmapsRedisConnecting = undefined;
+    }
   })();
 
   return global.__farmapsRedisConnecting;
