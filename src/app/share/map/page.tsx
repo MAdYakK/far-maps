@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { sdk } from "@farcaster/miniapp-sdk";
 
-import { createPublicClient, createWalletClient, custom } from "viem";
+import { createPublicClient, createWalletClient, custom, http } from "viem";
 import { base } from "viem/chains";
 import { erc20Abi } from "viem";
 
@@ -221,7 +221,7 @@ export default function ShareMapPage() {
       setMinting(true);
       setMintStage("Connecting wallet…");
 
-      // 1) Wallet provider
+      // 1) Wallet provider (writes only)
       const ethProvider = await sdk.wallet.getEthereumProvider();
 
       const walletClient = createWalletClient({
@@ -229,14 +229,15 @@ export default function ShareMapPage() {
         transport: custom(ethProvider as any),
       });
 
-      // ✅ use injected provider for reads too
-      const publicClient = createPublicClient({
-        chain: base,
-        transport: custom(ethProvider as any),
-      });
-
       const [account] = await walletClient.getAddresses();
       if (!account) throw new Error("No wallet connected");
+
+      // ✅ Reads + receipts MUST use a real RPC, not the miniapp provider
+      const rpcUrl = process.env.NEXT_PUBLIC_BASE_RPC_URL;
+      const publicClient = createPublicClient({
+        chain: base,
+        transport: rpcUrl ? http(rpcUrl) : http(),
+      });
 
       // ✅ 1 mint per wallet: check onchain balance
       setMintStage("Checking mint status…");
@@ -247,7 +248,6 @@ export default function ShareMapPage() {
         args: [account],
       });
 
-      // ✅ FIX: no BigInt literal (0n)
       if (bal > BigInt(0)) {
         setMintStage("");
         setAlreadyMintedOpen(true);
@@ -287,7 +287,7 @@ export default function ShareMapPage() {
         throw new Error(vJson ? JSON.stringify(vJson) : "Voucher failed");
       }
 
-      // 4) Approve EXACTLY 1 mint (just mintPrice)
+      // 4) Approve EXACTLY 1 mint
       setMintStage("Approving USDC…");
       const onchainPrice = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
@@ -385,10 +385,7 @@ export default function ShareMapPage() {
         >
           <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
 
-          <BubbleButton
-            onClick={mintNow}
-            disabled={!fid || minting || sharing || imgOk === false || loadingImg}
-          >
+          <BubbleButton onClick={mintNow} disabled={!fid || minting || sharing || imgOk === false || loadingImg}>
             {minting ? "Minting…" : "Mint"}
           </BubbleButton>
 
@@ -471,9 +468,7 @@ export default function ShareMapPage() {
               />
 
               {/* Loading overlay */}
-              {loadingImg && (
-                <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />
-              )}
+              {loadingImg && <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />}
 
               {/* Already minted overlay */}
               {alreadyMintedOpen && (
@@ -588,8 +583,8 @@ function OverlayCard({
           padding: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
           position: "relative",
-          pointerEvents: "none", // ✅ allows overlay click to work
         }}
+        onClick={(e) => e.stopPropagation()}
       >
         {onClose ? (
           <button
@@ -612,7 +607,6 @@ function OverlayCard({
               cursor: "pointer",
               lineHeight: "24px",
               fontWeight: 800,
-              pointerEvents: "auto", // ✅ button still clickable
             }}
           >
             ×
