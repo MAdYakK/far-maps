@@ -256,7 +256,7 @@ export default function ShareMapPage() {
 
       // 2) Prepare (upload png + metadata)
       setMintStage("Preparing metadata…");
-      const prepRes = await fetch("/api/mint/prepare", {
+      const prepRes = await fetch("/api/mint/voucher", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
