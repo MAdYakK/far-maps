@@ -64,6 +64,11 @@ function getBaseUrl() {
   return "";
 }
 
+function getRpcUrl() {
+  // Prefer explicit env, fallback to Base public RPC
+  return process.env.NEXT_PUBLIC_BASE_RPC_URL || "https://mainnet.base.org";
+}
+
 type PrepareResp = {
   ok: true;
   fid: number;
@@ -233,12 +238,10 @@ export default function ShareMapPage() {
       if (!account) throw new Error("No wallet connected");
 
       // ✅ Reads + receipts MUST use a real RPC, not the miniapp provider
-      const rpcUrl = process.env.NEXT_PUBLIC_BASE_RPC_URL;
       const publicClient = createPublicClient({
         chain: base,
-        transport: http(process.env.NEXT_PUBLIC_BASE_RPC_URL || "https://mainnet.base.org"),
+        transport: http(getRpcUrl()),
       });
-
 
       // ✅ 1 mint per wallet: check onchain balance
       setMintStage("Checking mint status…");
@@ -257,7 +260,7 @@ export default function ShareMapPage() {
 
       // 2) Prepare (upload png + metadata)
       setMintStage("Preparing metadata…");
-      const prepRes = await fetch("/api/mint/voucher", {
+      const prepRes = await fetch("/api/mint/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
@@ -275,7 +278,6 @@ export default function ShareMapPage() {
 
       // 3) Voucher
       setMintStage("Fetching voucher…");
-
       const vRes = await fetch("/api/mint/voucher", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -596,6 +598,7 @@ function OverlayCard({
           padding: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
           position: "relative",
+          pointerEvents: "auto",
         }}
         onClick={(e) => e.stopPropagation()}
       >
