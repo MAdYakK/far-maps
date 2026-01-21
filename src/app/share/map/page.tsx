@@ -45,7 +45,7 @@ const farMapsMintAbi = [
     ],
     outputs: [{ name: "tokenId", type: "uint256" }],
   },
-  // ✅ for "already minted?" check
+  // for "already minted?" check
   {
     type: "function",
     name: "balanceOf",
@@ -62,11 +62,6 @@ function getBaseUrl() {
   if (env && env.startsWith("http")) return env.replace(/\/+$/, "");
   if (typeof window !== "undefined") return window.location.origin;
   return "";
-}
-
-function getRpcUrl() {
-  // Prefer explicit env, fallback to Base public RPC
-  return process.env.NEXT_PUBLIC_BASE_RPC_URL || "https://mainnet.base.org";
 }
 
 type PrepareResp = {
@@ -98,6 +93,10 @@ function shortAddr(a?: string) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+function isAddress(a: any): a is `0x${string}` {
+  return typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a);
+}
+
 export default function ShareMapPage() {
   const router = useRouter();
 
@@ -126,7 +125,7 @@ export default function ShareMapPage() {
   const [mintedTokenUri, setMintedTokenUri] = useState<string>("");
   const [mintedImageUrl, setMintedImageUrl] = useState<string>("");
 
-  // ✅ Already minted overlay
+  // Already minted overlay
   const [alreadyMintedOpen, setAlreadyMintedOpen] = useState(false);
 
   useEffect(() => {
@@ -226,7 +225,7 @@ export default function ShareMapPage() {
       setMinting(true);
       setMintStage("Connecting wallet…");
 
-      // 1) Wallet provider (writes only)
+      // 1) Provider + wallet client (writes)
       const ethProvider = await sdk.wallet.getEthereumProvider();
 
       const walletClient = createWalletClient({
@@ -234,16 +233,36 @@ export default function ShareMapPage() {
         transport: custom(ethProvider as any),
       });
 
-      const [account] = await walletClient.getAddresses();
-      if (!account) throw new Error("No wallet connected");
-
-      // ✅ Reads + receipts MUST use a real RPC, not the miniapp provider
+      // 2) Public client (reads + receipts) MUST use real RPC
+      const rpc =
+        process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
       const publicClient = createPublicClient({
         chain: base,
-        transport: http(getRpcUrl()),
+        transport: http(rpc),
       });
 
-      // ✅ 1 mint per wallet: check onchain balance
+      // 3) Get account reliably (fallback to eth_requestAccounts)
+      let account: `0x${string}` | undefined;
+      const addrs = await walletClient.getAddresses().catch(() => []);
+      if (addrs && addrs[0] && isAddress(addrs[0])) {
+        account = addrs[0];
+      } else {
+        // some miniapp providers require explicit request
+        const requested = (await (ethProvider as any).request?.({
+          method: "eth_requestAccounts",
+          params: [],
+        })) as string[] | undefined;
+
+        if (requested && requested[0] && isAddress(requested[0])) {
+          account = requested[0];
+        }
+      }
+
+      if (!account) {
+        throw new Error("No wallet connected (no address returned).");
+      }
+
+      // 4) 1 mint per wallet: check onchain balance
       setMintStage("Checking mint status…");
       const bal = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
@@ -258,7 +277,7 @@ export default function ShareMapPage() {
         return;
       }
 
-      // 2) Prepare (upload png + metadata)
+      // 5) Prepare (upload png + metadata)
       setMintStage("Preparing metadata…");
       const prepRes = await fetch("/api/mint/prepare", {
         method: "POST",
@@ -276,7 +295,7 @@ export default function ShareMapPage() {
       const tokenUri = prepJson.tokenUri;
       const imgUrl = prepJson.imageUrl;
 
-      // 3) Voucher
+      // 6) Voucher
       setMintStage("Fetching voucher…");
       const vRes = await fetch("/api/mint/voucher", {
         method: "POST",
@@ -289,9 +308,7 @@ export default function ShareMapPage() {
       let vJson: any = null;
       try {
         vJson = vText ? JSON.parse(vText) : null;
-      } catch {
-        // leave null
-      }
+      } catch {}
 
       if (!vRes.ok || !vJson?.ok) {
         const detail =
@@ -302,7 +319,7 @@ export default function ShareMapPage() {
         throw new Error(`Voucher failed: ${detail}`);
       }
 
-      // 4) Approve EXACTLY 1 mint
+      // 7) Approve EXACTLY 1 mint
       setMintStage("Approving USDC…");
       const onchainPrice = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
@@ -329,7 +346,7 @@ export default function ShareMapPage() {
         await publicClient.waitForTransactionReceipt({ hash: approveHash });
       }
 
-      // 5) Mint
+      // 8) Mint
       setMintStage("Minting…");
       const hash = await walletClient.writeContract({
         address: CONTRACT_ADDRESS,
@@ -354,7 +371,7 @@ export default function ShareMapPage() {
       setMintedImageUrl(imgUrl);
       setMintStage(`Minted! Tx ${shortAddr(hash)}`);
 
-      // 6) Optional: auto-share minted image
+      // 9) Optional: auto-share minted image
       try {
         await sdk.actions.composeCast({
           text: "I minted my Farmap 🗺️",
@@ -598,7 +615,6 @@ function OverlayCard({
           padding: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
           position: "relative",
-          pointerEvents: "auto",
         }}
         onClick={(e) => e.stopPropagation()}
       >
