@@ -274,6 +274,7 @@ export default function ShareMapPage() {
 
       // 3) Voucher
       setMintStage("Fetching voucher…");
+
       const vRes = await fetch("/api/mint/voucher", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -282,9 +283,20 @@ export default function ShareMapPage() {
       });
 
       const vText = await vRes.text();
-      const vJson = vText ? (JSON.parse(vText) as VoucherResp) : null;
+      let vJson: any = null;
+      try {
+        vJson = vText ? JSON.parse(vText) : null;
+      } catch {
+        // leave null
+      }
+
       if (!vRes.ok || !vJson?.ok) {
-        throw new Error(vJson ? JSON.stringify(vJson) : "Voucher failed");
+        const detail =
+          vJson?.error ||
+          vJson?.message ||
+          (vText ? vText.slice(0, 300) : "") ||
+          `HTTP ${vRes.status}`;
+        throw new Error(`Voucher failed: ${detail}`);
       }
 
       // 4) Approve EXACTLY 1 mint
