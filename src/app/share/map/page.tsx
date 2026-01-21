@@ -236,8 +236,9 @@ export default function ShareMapPage() {
       const rpcUrl = process.env.NEXT_PUBLIC_BASE_RPC_URL;
       const publicClient = createPublicClient({
         chain: base,
-        transport: rpcUrl ? http(rpcUrl) : http(),
+        transport: http(process.env.NEXT_PUBLIC_BASE_RPC_URL || "https://mainnet.base.org"),
       });
+
 
       // ✅ 1 mint per wallet: check onchain balance
       setMintStage("Checking mint status…");
