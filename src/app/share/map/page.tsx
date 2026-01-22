@@ -97,6 +97,20 @@ function isAddress(a: any): a is `0x${string}` {
   return typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a);
 }
 
+// ✅ Robust address normalizer (handles strings, arrays, and common objects)
+function normalizeAddr(v: any): `0x${string}` | null {
+  let s: any = null;
+
+  if (typeof v === "string") s = v;
+  else if (Array.isArray(v)) s = v[0];
+  else if (v && typeof v === "object") s = v.address ?? v.account ?? v?.[0];
+
+  if (!s) return null;
+
+  const trimmed = String(s).trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? (trimmed as `0x${string}`) : null;
+}
+
 export default function ShareMapPage() {
   const router = useRouter();
 
@@ -234,32 +248,47 @@ export default function ShareMapPage() {
       });
 
       // 2) Public client (reads + receipts) MUST use real RPC
-      const rpc =
-        process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
+      const rpc = process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
       const publicClient = createPublicClient({
         chain: base,
         transport: http(rpc),
       });
 
-      // 3) Get account reliably (fallback to eth_requestAccounts)
-      let account: `0x${string}` | undefined;
-      const addrs = await walletClient.getAddresses().catch(() => []);
-      if (addrs && addrs[0] && isAddress(addrs[0])) {
-        account = addrs[0];
-      } else {
-        // some miniapp providers require explicit request
-        const requested = (await (ethProvider as any).request?.({
-          method: "eth_requestAccounts",
-          params: [],
-        })) as string[] | undefined;
+      // 3) Get account VERY robustly
+      let account: `0x${string}` | null = null;
 
-        if (requested && requested[0] && isAddress(requested[0])) {
-          account = requested[0];
-        }
+      // Try viem first
+      try {
+        const addrs = await walletClient.getAddresses();
+        account = normalizeAddr(addrs);
+      } catch {}
+
+      // Try eth_accounts (no prompt)
+      if (!account) {
+        try {
+          const accts = await (ethProvider as any).request?.({ method: "eth_accounts", params: [] });
+          account = normalizeAddr(accts);
+        } catch {}
+      }
+
+      // Finally prompt
+      if (!account) {
+        try {
+          const requested = await (ethProvider as any).request?.({
+            method: "eth_requestAccounts",
+            params: [],
+          });
+          account = normalizeAddr(requested);
+        } catch {}
       }
 
       if (!account) {
-        throw new Error("No wallet connected (no address returned).");
+        throw new Error("No wallet address returned from provider (eth_accounts / eth_requestAccounts).");
+      }
+
+      // Hard guard: never call voucher with bad to
+      if (!isAddress(account)) {
+        throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
 
       // 4) 1 mint per wallet: check onchain balance
@@ -297,6 +326,10 @@ export default function ShareMapPage() {
 
       // 6) Voucher
       setMintStage("Fetching voucher…");
+
+      // Optional debug:
+      // console.log("[mint] voucher body", { to: account, tokenUri });
+
       const vRes = await fetch("/api/mint/voucher", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -430,15 +463,11 @@ export default function ShareMapPage() {
           </div>
 
           {mintStage ? (
-            <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>
-              {mintStage}
-            </div>
+            <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>{mintStage}</div>
           ) : null}
 
           {mintErr ? (
-            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>
-              {mintErr}
-            </div>
+            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>{mintErr}</div>
           ) : null}
 
           {mintedTokenUri ? (
