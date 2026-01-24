@@ -363,7 +363,8 @@ export default function ShareMapPage() {
         headers: {
           "Content-Type": "application/json",
           "x-mint-attempt-id": mintAttemptId,
-        },
+          "x-wallet-address": toAddress,
+},
         cache: "no-store",
         body: JSON.stringify({ mintAttemptId, to: toAddress, tokenUri }),
       });
