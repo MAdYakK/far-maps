@@ -16,9 +16,6 @@ const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
-// Visible build marker (helps confirm Warpcast is actually loading your latest deploy)
-const UI_BUILD = "ui-build-2026-01-23-02";
-
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -77,24 +74,6 @@ type PrepareResp = {
   metaTx: string;
   imageUrls?: Record<string, string>;
   tokenUriUrls?: Record<string, string>;
-};
-
-type VoucherResp = {
-  ok: true;
-  voucher: {
-    to: `0x${string}`;
-    tokenURI: string;
-    price: string; // uint256 as string
-    nonce: string; // uint256 as string
-    deadline: string; // uint256 as string
-  };
-  signature: `0x${string}`;
-  // optional debug fields could exist
-  version?: string;
-  mintAttemptId?: string;
-  receivedToType?: string;
-  receivedTo?: string;
-  rawBody?: string;
 };
 
 function shortAddr(a?: string) {
@@ -294,7 +273,6 @@ export default function ShareMapPage() {
       if (!account) {
         throw new Error("No wallet address returned from provider (eth_accounts / eth_requestAccounts).");
       }
-
       if (!isAddress(account)) {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
@@ -332,37 +310,46 @@ export default function ShareMapPage() {
       const tokenUri = prepJson.tokenUri;
       const imgUrl = prepJson.imageUrl;
 
-      // 6) Voucher
-      setMintStage("Fetching voucher…");
+      // 6) Voucher (NEW: sign message so server can recover `to`)
+      setMintStage("Authorizing mint…");
 
-      // ✅ Force primitive string + attempt id for server-side tracing
-      const mintAttemptId =
-        (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+      const mintAttemptId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
 
-      // ✅ CRITICAL: ensure `to` can never be undefined (undefined fields get dropped by JSON.stringify)
-      const toAddress = String(account ?? "").trim();
-      if (!toAddress || !/^0x[0-9a-fA-F]{40}$/.test(toAddress)) {
-        throw new Error(
-          `Wallet address missing/invalid before voucher call: ${JSON.stringify({
-            account,
-            toAddress,
-          })}`
-        );
+      const message =
+        `FarMaps mint authorization\n` +
+        `mintAttemptId: ${mintAttemptId}\n` +
+        `tokenUri: ${tokenUri}\n` +
+        `timestamp: ${Date.now()}`;
+
+      // Sign with the connected wallet
+      let userSig: `0x${string}` | null = null;
+      try {
+        userSig = (await walletClient.signMessage({
+          account,
+          message,
+        })) as `0x${string}`;
+      } catch (e: any) {
+        throw new Error(e?.message || "User signature rejected");
       }
 
-      // ✅ Use absolute URL in Warpcast to avoid any weird relative-path behavior
-const voucherUrl =
-  `${getBaseUrl()}/api/mint/voucher` +
-  `?to=${encodeURIComponent(toAddress)}` +
-  `&tokenUri=${encodeURIComponent(tokenUri)}`;
+      setMintStage("Fetching voucher…");
 
-const vRes = await fetch(voucherUrl, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  cache: "no-store",
-  body: JSON.stringify({ mintAttemptId }), // body can be minimal now
-});
-
+      const vRes = await fetch("/api/mint/voucher", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mint-attempt-id": mintAttemptId,
+        },
+        cache: "no-store",
+        body: JSON.stringify({
+          mintAttemptId,
+          // still include to as a bonus, but server can ignore it if it arrives undefined
+          to: String(account),
+          tokenUri,
+          message,
+          signature: userSig,
+        }),
+      });
 
       const vText = await vRes.text();
       let vJson: any = null;
@@ -370,9 +357,8 @@ const vRes = await fetch(voucherUrl, {
         vJson = vText ? JSON.parse(vText) : null;
       } catch {}
 
-      // ✅ Show the whole response body text on failure, not just vJson.error
       if (!vRes.ok || !vJson?.ok) {
-        const detail = vText ? vText.slice(0, 1800) : `HTTP ${vRes.status}`;
+        const detail = vText ? vText.slice(0, 1200) : `HTTP ${vRes.status}`;
         throw new Error(`Voucher failed: ${detail}`);
       }
 
@@ -484,7 +470,6 @@ const vRes = await fetch(voucherUrl, {
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
             {fid ? `FID ${fid} • ${mode}` : "Loading…"}
-            <div style={{ fontSize: 10, opacity: 0.7 }}>Build: {UI_BUILD}</div>
           </div>
 
           {mintStage ? (
@@ -492,18 +477,7 @@ const vRes = await fetch(voucherUrl, {
           ) : null}
 
           {mintErr ? (
-            <pre
-              style={{
-                width: "100%",
-                fontSize: 11,
-                color: "#ffb4b4",
-                marginTop: 4,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-              }}
-            >
-              {mintErr}
-            </pre>
+            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>{mintErr}</div>
           ) : null}
 
           {mintedTokenUri ? (
