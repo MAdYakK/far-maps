@@ -16,6 +16,9 @@ const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
+// Visible build marker (helps confirm Warpcast is actually loading your latest deploy)
+const UI_BUILD = "ui-build-2026-01-23-02";
+
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -292,7 +295,6 @@ export default function ShareMapPage() {
         throw new Error("No wallet address returned from provider (eth_accounts / eth_requestAccounts).");
       }
 
-      // Hard guard: never call voucher with bad to
       if (!isAddress(account)) {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
@@ -336,12 +338,27 @@ export default function ShareMapPage() {
       // ✅ Force primitive string + attempt id for server-side tracing
       const mintAttemptId =
         (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
-      const toAddress = String(account).trim();
+
+      // ✅ CRITICAL: ensure `to` can never be undefined (undefined fields get dropped by JSON.stringify)
+      const toAddress = String(account ?? "").trim();
+      if (!toAddress || !/^0x[0-9a-fA-F]{40}$/.test(toAddress)) {
+        throw new Error(
+          `Wallet address missing/invalid before voucher call: ${JSON.stringify({
+            account,
+            toAddress,
+          })}`
+        );
+      }
+
+      // ✅ Use absolute URL in Warpcast to avoid any weird relative-path behavior
+      const baseUrl = getBaseUrl();
+      const voucherUrl = `${baseUrl}/api/mint/voucher`;
 
       console.log("[mint] toAddress =", toAddress, "typeof =", typeof toAddress);
+      console.log("[mint] voucherUrl =", voucherUrl);
       console.log("[mint] voucher body =", { mintAttemptId, to: toAddress, tokenUri });
 
-      const vRes = await fetch("/api/mint/voucher", {
+      const vRes = await fetch(voucherUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -357,10 +374,9 @@ export default function ShareMapPage() {
         vJson = vText ? JSON.parse(vText) : null;
       } catch {}
 
-      // ✅ IMPORTANT CHANGE:
-      // Show the whole response body text on failure, not just vJson.error
+      // ✅ Show the whole response body text on failure, not just vJson.error
       if (!vRes.ok || !vJson?.ok) {
-        const detail = vText ? vText.slice(0, 1200) : `HTTP ${vRes.status}`;
+        const detail = vText ? vText.slice(0, 1800) : `HTTP ${vRes.status}`;
         throw new Error(`Voucher failed: ${detail}`);
       }
 
@@ -472,6 +488,7 @@ export default function ShareMapPage() {
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
             {fid ? `FID ${fid} • ${mode}` : "Loading…"}
+            <div style={{ fontSize: 10, opacity: 0.7 }}>Build: {UI_BUILD}</div>
           </div>
 
           {mintStage ? (
@@ -479,7 +496,18 @@ export default function ShareMapPage() {
           ) : null}
 
           {mintErr ? (
-            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>{mintErr}</div>
+            <pre
+              style={{
+                width: "100%",
+                fontSize: 11,
+                color: "#ffb4b4",
+                marginTop: 4,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {mintErr}
+            </pre>
           ) : null}
 
           {mintedTokenUri ? (
