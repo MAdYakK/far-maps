@@ -86,6 +86,8 @@ type VoucherResp = {
     deadline: string; // uint256 as string
   };
   signature: `0x${string}`;
+  // optional debug fields could exist
+  debug?: any;
 };
 
 function shortAddr(a?: string) {
@@ -327,14 +329,22 @@ export default function ShareMapPage() {
       // 6) Voucher
       setMintStage("Fetching voucher…");
 
-      // Optional debug:
-      // console.log("[mint] voucher body", { to: account, tokenUri });
+      // ✅ Force primitive string + add attempt id so server logs can match this request
+      const mintAttemptId =
+        (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+      const toAddress = String(account).trim();
+
+      console.log("[mint] toAddress =", toAddress, "typeof =", typeof toAddress);
+      console.log("[mint] voucher body =", { mintAttemptId, to: toAddress, tokenUri });
 
       const vRes = await fetch("/api/mint/voucher", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-mint-attempt-id": mintAttemptId,
+        },
         cache: "no-store",
-        body: JSON.stringify({ to: account, tokenUri }),
+        body: JSON.stringify({ mintAttemptId, to: toAddress, tokenUri }),
       });
 
       const vText = await vRes.text();
@@ -347,8 +357,10 @@ export default function ShareMapPage() {
         const detail =
           vJson?.error ||
           vJson?.message ||
-          (vText ? vText.slice(0, 300) : "") ||
+          (vText ? vText.slice(0, 600) : "") ||
           `HTTP ${vRes.status}`;
+        // If server returned debug, surface it in console
+        if (vJson?.debug) console.log("[mint] voucher debug:", vJson.debug);
         throw new Error(`Voucher failed: ${detail}`);
       }
 
