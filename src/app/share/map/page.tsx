@@ -87,7 +87,11 @@ type VoucherResp = {
   };
   signature: `0x${string}`;
   // optional debug fields could exist
-  debug?: any;
+  version?: string;
+  mintAttemptId?: string;
+  receivedToType?: string;
+  receivedTo?: string;
+  rawBody?: string;
 };
 
 function shortAddr(a?: string) {
@@ -329,7 +333,7 @@ export default function ShareMapPage() {
       // 6) Voucher
       setMintStage("Fetching voucher…");
 
-      // ✅ Force primitive string + add attempt id so server logs can match this request
+      // ✅ Force primitive string + attempt id for server-side tracing
       const mintAttemptId =
         (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
       const toAddress = String(account).trim();
@@ -353,14 +357,10 @@ export default function ShareMapPage() {
         vJson = vText ? JSON.parse(vText) : null;
       } catch {}
 
+      // ✅ IMPORTANT CHANGE:
+      // Show the whole response body text on failure, not just vJson.error
       if (!vRes.ok || !vJson?.ok) {
-        const detail =
-          vJson?.error ||
-          vJson?.message ||
-          (vText ? vText.slice(0, 600) : "") ||
-          `HTTP ${vRes.status}`;
-        // If server returned debug, surface it in console
-        if (vJson?.debug) console.log("[mint] voucher debug:", vJson.debug);
+        const detail = vText ? vText.slice(0, 1200) : `HTTP ${vRes.status}`;
         throw new Error(`Voucher failed: ${detail}`);
       }
 
