@@ -6,27 +6,23 @@ import { createPublicClient, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
+const VERSION = "voucher-route-v3-debug-top"; // 👈 change this string if you redeploy again
+
 function mustEnv(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
 
-/**
- * We accept a few possible shapes because different callers/providers
- * sometimes send odd payloads.
- */
 type Body = {
   mintAttemptId?: any;
   to?: any;
   tokenUri?: any;
   tokenURI?: any;
   deadlineSeconds?: any;
-  // allow other keys without failing
   [k: string]: any;
 };
 
-// ✅ Deep address normalizer: unwraps nested objects/arrays a few levels
 function normalizeAddress(input: any): `0x${string}` | null {
   let v: any = input;
 
@@ -41,13 +37,7 @@ function normalizeAddress(input: any): `0x${string}` | null {
     }
 
     if (typeof v === "object") {
-      v =
-        v.address ??
-        v.account ??
-        v.value ??
-        v.owner ??
-        v.to ??
-        v?.[0];
+      v = v.address ?? v.account ?? v.value ?? v.owner ?? v.to ?? v?.[0];
       continue;
     }
 
@@ -58,7 +48,6 @@ function normalizeAddress(input: any): `0x${string}` | null {
 
   const s = v.trim();
   if (!/^0x[0-9a-fA-F]{40}$/.test(s)) return null;
-
   return s as `0x${string}`;
 }
 
@@ -78,14 +67,14 @@ const CONTRACT_ABI = parseAbi([
 ]);
 
 export async function POST(req: Request) {
-  // Capture useful request metadata + raw body for Warpcast debugging
+  // Read raw body once
+  const raw = await req.text();
+
   const attemptIdHeader = req.headers.get("x-mint-attempt-id") ?? "(none)";
   const contentType = req.headers.get("content-type") ?? "(none)";
   const origin = req.headers.get("origin") ?? "(none)";
   const referer = req.headers.get("referer") ?? "(none)";
-  const ua = req.headers.get("user-agent") ?? "(none)";
-
-  const raw = await req.text();
+  const ua = (req.headers.get("user-agent") ?? "(none)").slice(0, 160);
 
   let body: Body | null = null;
   let parseError: string | null = null;
@@ -96,74 +85,106 @@ export async function POST(req: Request) {
     parseError = e?.message ?? String(e);
   }
 
-  const mintAttemptId = (body?.mintAttemptId ?? attemptIdHeader ?? "(none)") as string;
+  const mintAttemptId = String(body?.mintAttemptId ?? attemptIdHeader ?? "(none)");
 
-  const debug = {
-    mintAttemptId,
-    headers: {
+  const receivedTo = body?.to;
+  const receivedToType =
+    receivedTo === null
+      ? "null"
+      : Array.isArray(receivedTo)
+        ? "array"
+        : typeof receivedTo;
+
+  const receivedToPreview = (() => {
+    try {
+      if (typeof receivedTo === "string") return receivedTo.slice(0, 140);
+      return JSON.stringify(receivedTo)?.slice(0, 280);
+    } catch {
+      return String(receivedTo).slice(0, 280);
+    }
+  })();
+
+  // If JSON is invalid/empty, surface that immediately
+  if (!body) {
+    console.log("[mint/voucher] invalid json", {
+      VERSION,
+      mintAttemptId,
+      parseError,
+      raw: raw?.slice(0, 400),
       contentType,
       origin,
       referer,
-      ua: ua.slice(0, 160),
-    },
-    parseError,
-    rawBody: (raw ?? "").slice(0, 2000),
-    receivedToType:
-      body?.to === null
-        ? "null"
-        : Array.isArray(body?.to)
-          ? "array"
-          : typeof body?.to,
-    receivedTo: (() => {
-      try {
-        if (typeof body?.to === "string") return body.to.slice(0, 140);
-        return JSON.stringify(body?.to)?.slice(0, 280);
-      } catch {
-        return String(body?.to).slice(0, 280);
-      }
-    })(),
-  };
+      ua,
+    });
+
+    return NextResponse.json(
+      {
+        version: VERSION,
+        error: "Invalid JSON body",
+        mintAttemptId,
+        parseError,
+        contentType,
+        origin,
+        referer,
+        ua,
+        rawBody: (raw ?? "").slice(0, 1200),
+      },
+      { status: 400 }
+    );
+  }
+
+  const to = normalizeAddress(body?.to);
+  const tokenUri = normalizeTokenUri(body);
+
+  const deadlineSeconds =
+    typeof body?.deadlineSeconds === "number" && body.deadlineSeconds > 0
+      ? Math.floor(body.deadlineSeconds)
+      : 15 * 60;
+
+  if (!to) {
+    console.log("[mint/voucher] missing/invalid to", {
+      VERSION,
+      mintAttemptId,
+      receivedToType,
+      receivedToPreview,
+      raw: raw?.slice(0, 400),
+      contentType,
+      origin,
+      referer,
+      ua,
+    });
+
+    // 👇 IMPORTANT: put debug at top-level so your UI shows it even if it only reads {error: ...}
+    return NextResponse.json(
+      {
+        version: VERSION,
+        error: "Missing or invalid `to`",
+        mintAttemptId,
+        receivedToType,
+        receivedTo: receivedToPreview,
+        contentType,
+        origin,
+        referer,
+        ua,
+        rawBody: (raw ?? "").slice(0, 1200),
+      },
+      { status: 400 }
+    );
+  }
+
+  if (!tokenUri) {
+    return NextResponse.json(
+      {
+        version: VERSION,
+        error: "Missing `tokenUri`",
+        mintAttemptId,
+        hint: "Send JSON { to: '0x..', tokenUri: 'https://...' }",
+      },
+      { status: 400 }
+    );
+  }
 
   try {
-    if (!body) {
-      console.log("[mint/voucher] invalid json", debug);
-      return NextResponse.json(
-        { error: "Invalid JSON body", debug },
-        { status: 400 }
-      );
-    }
-
-    const to = normalizeAddress(body?.to);
-    const tokenUri = normalizeTokenUri(body);
-
-    const deadlineSeconds =
-      typeof body?.deadlineSeconds === "number" && body.deadlineSeconds > 0
-        ? Math.floor(body.deadlineSeconds)
-        : 15 * 60;
-
-    if (!to) {
-      console.log("[mint/voucher] missing/invalid to", { ...debug, extractedTo: null });
-      return NextResponse.json(
-        {
-          error: "Missing or invalid `to`",
-          debug: { ...debug, extractedTo: null },
-        },
-        { status: 400 }
-      );
-    }
-
-    if (!tokenUri) {
-      console.log("[mint/voucher] missing tokenUri", { ...debug, extractedTo: to });
-      return NextResponse.json(
-        {
-          error: "Missing `tokenUri`",
-          hint: "Send JSON { to: '0x..', tokenUri: 'https://...' }",
-          debug: { ...debug, extractedTo: to },
-        },
-        { status: 400 }
-      );
-    }
-
     const contract = mustEnv("FARMAPS_CONTRACT") as `0x${string}`;
     const rpcUrl = mustEnv("BASE_RPC_URL");
     const pk = mustEnv("VOUCHER_SIGNER_PRIVATE_KEY");
@@ -202,7 +223,6 @@ export async function POST(req: Request) {
       deadline,
     } as const;
 
-    // Must match contract: EIP712("Far Maps", "1")
     const domain = {
       name: "Far Maps",
       version: "1",
@@ -227,9 +247,8 @@ export async function POST(req: Request) {
       message: voucher,
     });
 
-    console.log("[mint/voucher] ok", { ...debug, extractedTo: to });
-
     return NextResponse.json({
+      version: VERSION,
       ok: true,
       voucher: {
         to: voucher.to,
@@ -239,16 +258,15 @@ export async function POST(req: Request) {
         deadline: voucher.deadline.toString(),
       },
       signature,
-      // Keep debug for now until you confirm Warpcast is sending correct payload
-      debug: { ...debug, extractedTo: to },
     });
   } catch (e: any) {
-    console.error("mint/voucher error:", e, debug);
+    console.error("mint/voucher error:", e);
     return NextResponse.json(
       {
+        version: VERSION,
         error: e?.message || "Server error",
+        mintAttemptId,
         detail: String(e?.stack || "").slice(0, 2000),
-        debug,
       },
       { status: 500 }
     );
