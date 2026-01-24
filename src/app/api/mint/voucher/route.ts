@@ -1,17 +1,13 @@
 // src/app/api/mint/voucher/route.ts
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic"; // ✅ avoid any caching weirdness
 
 import { NextResponse } from "next/server";
-import {
-  createPublicClient,
-  http,
-  parseAbi,
-  verifyMessage,
-} from "viem";
+import { createPublicClient, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
-const VERSION = "voucher-route-v4-auth-debug"; // 👈 bump when you redeploy
+const VERSION = "voucher-route-v5-query-fallback"; // 👈 bump on redeploy
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -21,24 +17,10 @@ function mustEnv(name: string) {
 
 type Body = {
   mintAttemptId?: any;
-
-  // legacy / fallback
   to?: any;
-
-  // token uri
   tokenUri?: any;
   tokenURI?: any;
-
-  // optional deadline
   deadlineSeconds?: any;
-
-  // auth challenge (preferred)
-  auth?: {
-    address?: any;
-    message?: any;
-    signature?: any;
-  };
-
   [k: string]: any;
 };
 
@@ -80,19 +62,13 @@ function normalizeTokenUri(body: Body): string {
   return raw.trim();
 }
 
-function normalizeString(v: any): string {
-  if (typeof v === "string") return v;
-  if (v === null || v === undefined) return "";
-  return String(v);
-}
-
 const CONTRACT_ABI = parseAbi([
   "function nonces(address) view returns (uint256)",
   "function mintPrice() view returns (uint256)",
 ]);
 
 export async function POST(req: Request) {
-  // Read raw body once
+  // read raw once
   const raw = await req.text();
 
   const attemptIdHeader = req.headers.get("x-mint-attempt-id") ?? "(none)";
@@ -101,7 +77,6 @@ export async function POST(req: Request) {
   const referer = req.headers.get("referer") ?? "(none)";
   const ua = (req.headers.get("user-agent") ?? "(none)").slice(0, 160);
 
-  // Header fallback (temporary unblock)
   const walletHdr = req.headers.get("x-wallet-address") ?? "";
 
   let body: Body | null = null;
@@ -115,14 +90,32 @@ export async function POST(req: Request) {
 
   const mintAttemptId = String(body?.mintAttemptId ?? attemptIdHeader ?? "(none)");
 
-  // Basic debug on received `to`
+  // ✅ ALSO accept query params (Warpcast-safe)
+  const url = new URL(req.url);
+  const qTo = url.searchParams.get("to") ?? "";
+  const qTokenUri = url.searchParams.get("tokenUri") ?? url.searchParams.get("tokenURI") ?? "";
+
+  // If JSON invalid/empty, still allow query params to work
+  if (!body) body = {} as Body;
+
+  // Determine tokenUri from body OR query
+  const tokenUri = (normalizeTokenUri(body) || qTokenUri || "").trim();
+
+  // Determine `to` from body OR query OR header
+  const to =
+    normalizeAddress(body?.to) ||
+    normalizeAddress(qTo) ||
+    normalizeAddress(walletHdr);
+
+  const deadlineSeconds =
+    typeof body?.deadlineSeconds === "number" && body.deadlineSeconds > 0
+      ? Math.floor(body.deadlineSeconds)
+      : 15 * 60;
+
+  // Helpful debug fields
   const receivedTo = body?.to;
   const receivedToType =
-    receivedTo === null
-      ? "null"
-      : Array.isArray(receivedTo)
-        ? "array"
-        : typeof receivedTo;
+    receivedTo === null ? "null" : Array.isArray(receivedTo) ? "array" : typeof receivedTo;
 
   const receivedToPreview = (() => {
     try {
@@ -133,41 +126,42 @@ export async function POST(req: Request) {
     }
   })();
 
-  // If JSON invalid/empty, surface that immediately
-  if (!body) {
-    console.log("[mint/voucher] invalid json", {
+  if (parseError) {
+    console.log("[mint/voucher] json parse error", {
       VERSION,
       mintAttemptId,
       parseError,
       raw: raw?.slice(0, 400),
+      qTo: qTo.slice(0, 80),
+      qTokenUri: qTokenUri.slice(0, 120),
       contentType,
       origin,
       referer,
       ua,
     });
+  }
 
+  if (!to) {
     return NextResponse.json(
       {
         version: VERSION,
-        error: "Invalid JSON body",
+        error: "Missing or invalid `to`",
         mintAttemptId,
-        parseError,
+        receivedToType,
+        receivedTo: receivedToPreview,
+        qToPreview: qTo ? qTo.slice(0, 140) : "(none)",
+        walletHdrPreview: walletHdr ? walletHdr.slice(0, 140) : "(none)",
+        tokenUriPreview: tokenUri ? tokenUri.slice(0, 160) : "(none)",
         contentType,
         origin,
         referer,
         ua,
         rawBody: (raw ?? "").slice(0, 1200),
+        hint: "Send ?to=0x...&tokenUri=... (Warpcast-safe).",
       },
       { status: 400 }
     );
   }
-
-  const tokenUri = normalizeTokenUri(body);
-
-  const deadlineSeconds =
-    typeof body?.deadlineSeconds === "number" && body.deadlineSeconds > 0
-      ? Math.floor(body.deadlineSeconds)
-      : 15 * 60;
 
   if (!tokenUri) {
     return NextResponse.json(
@@ -175,132 +169,12 @@ export async function POST(req: Request) {
         version: VERSION,
         error: "Missing `tokenUri`",
         mintAttemptId,
-        hint: "Send JSON { tokenUri: 'https://...' , auth: { address, message, signature } }",
-        contentType,
-        origin,
-        referer,
-        ua,
-        rawBody: (raw ?? "").slice(0, 1200),
+        hint: "Send ?to=0x...&tokenUri=https://... (Warpcast-safe).",
       },
       { status: 400 }
     );
   }
 
-  // ─────────────────────────────────────────────
-  // ✅ Preferred: AUTH (wallet signature challenge)
-  // ─────────────────────────────────────────────
-  let to: `0x${string}` | null = null;
-  let authUsed: "auth" | "body.to" | "header" | "none" = "none";
-
-  const authAddr = normalizeAddress(body?.auth?.address);
-  const authMsg = normalizeString(body?.auth?.message);
-  const authSig = normalizeString(body?.auth?.signature);
-
-  if (authAddr && authMsg && /^0x[0-9a-fA-F]+$/.test(authSig)) {
-    try {
-      const ok = await verifyMessage({
-        address: authAddr,
-        message: authMsg,
-        signature: authSig as `0x${string}`,
-      });
-
-      if (!ok) {
-        return NextResponse.json(
-          {
-            version: VERSION,
-            error: "Invalid auth signature",
-            mintAttemptId,
-            auth: {
-              address: authAddr,
-              messagePreview: authMsg.slice(0, 180),
-              signaturePreview: authSig.slice(0, 26) + "…",
-            },
-            contentType,
-            origin,
-            referer,
-            ua,
-          },
-          { status: 401 }
-        );
-      }
-
-      to = authAddr;
-      authUsed = "auth";
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          version: VERSION,
-          error: "Auth verification failed",
-          mintAttemptId,
-          detail: e?.message ?? String(e),
-          contentType,
-          origin,
-          referer,
-          ua,
-        },
-        { status: 401 }
-      );
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  // Fallbacks (keep these while you migrate)
-  // ─────────────────────────────────────────────
-  if (!to) {
-    const fromBody = normalizeAddress(body?.to);
-    if (fromBody) {
-      to = fromBody;
-      authUsed = "body.to";
-    }
-  }
-
-  // TEMP UNBLOCK: allow header `x-wallet-address` if no auth
-  if (!to) {
-    const fromHdr = normalizeAddress(walletHdr);
-    if (fromHdr) {
-      to = fromHdr;
-      authUsed = "header";
-    }
-  }
-
-  if (!to) {
-    console.log("[mint/voucher] missing/invalid to", {
-      VERSION,
-      mintAttemptId,
-      receivedToType,
-      receivedToPreview,
-      walletHdr: walletHdr ? walletHdr.slice(0, 80) : "(none)",
-      raw: raw?.slice(0, 400),
-      contentType,
-      origin,
-      referer,
-      ua,
-    });
-
-    return NextResponse.json(
-      {
-        version: VERSION,
-        error: "Missing or invalid `to`",
-        mintAttemptId,
-        authUsed,
-        receivedToType,
-        receivedTo: receivedToPreview,
-        walletHdrPreview: walletHdr ? walletHdr.slice(0, 140) : "(none)",
-        contentType,
-        origin,
-        referer,
-        ua,
-        rawBody: (raw ?? "").slice(0, 1200),
-        hint:
-          "Warpcast may prefetch/probe this endpoint without `to`. Prefer auth: {address,message,signature} or send x-wallet-address header.",
-      },
-      { status: 400 }
-    );
-  }
-
-  // ─────────────────────────────────────────────
-  // Voucher signing
-  // ─────────────────────────────────────────────
   try {
     const contract = mustEnv("FARMAPS_CONTRACT") as `0x${string}`;
     const rpcUrl = mustEnv("BASE_RPC_URL");
@@ -368,7 +242,6 @@ export async function POST(req: Request) {
       version: VERSION,
       ok: true,
       mintAttemptId,
-      authUsed,
       voucher: {
         to: voucher.to,
         tokenURI: voucher.tokenURI,

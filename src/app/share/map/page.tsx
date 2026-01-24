@@ -351,23 +351,18 @@ export default function ShareMapPage() {
       }
 
       // ✅ Use absolute URL in Warpcast to avoid any weird relative-path behavior
-      const baseUrl = getBaseUrl();
-      const voucherUrl = `${baseUrl}/api/mint/voucher`;
+const voucherUrl =
+  `${getBaseUrl()}/api/mint/voucher` +
+  `?to=${encodeURIComponent(toAddress)}` +
+  `&tokenUri=${encodeURIComponent(tokenUri)}`;
 
-      console.log("[mint] toAddress =", toAddress, "typeof =", typeof toAddress);
-      console.log("[mint] voucherUrl =", voucherUrl);
-      console.log("[mint] voucher body =", { mintAttemptId, to: toAddress, tokenUri });
+const vRes = await fetch(voucherUrl, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  cache: "no-store",
+  body: JSON.stringify({ mintAttemptId }), // body can be minimal now
+});
 
-      const vRes = await fetch(voucherUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-mint-attempt-id": mintAttemptId,
-          "x-wallet-address": toAddress,
-},
-        cache: "no-store",
-        body: JSON.stringify({ mintAttemptId, to: toAddress, tokenUri }),
-      });
 
       const vText = await vRes.text();
       let vJson: any = null;
