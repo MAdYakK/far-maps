@@ -334,7 +334,10 @@ export default function ShareMapPage() {
 
       setMintStage("Fetching voucher…");
 
-      const vRes = await fetch("/api/mint/voucher", {
+      const baseUrl = getBaseUrl(); // should be https://far-maps.vercel.app
+if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.location.origin)");
+
+        const vRes = await fetch(`${baseUrl}/api/mint/voucher`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -343,13 +346,12 @@ export default function ShareMapPage() {
         cache: "no-store",
         body: JSON.stringify({
           mintAttemptId,
-          // still include to as a bonus, but server can ignore it if it arrives undefined
           to: String(account),
           tokenUri,
           message,
           signature: userSig,
         }),
-      });
+        });
 
       const vText = await vRes.text();
       let vJson: any = null;

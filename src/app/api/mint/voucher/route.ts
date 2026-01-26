@@ -1,12 +1,13 @@
 // src/app/api/mint/voucher/route.ts
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic"; // ✅ avoid any caching weirdness
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http, parseAbi, recoverMessageAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
-const VERSION = "voucher-route-v4-recover-to-from-signature";
+const VERSION = "voucher-route-v5-reqid-errlog-recover-to";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -24,7 +25,7 @@ type Body = {
   tokenUri?: any;
   tokenURI?: any;
 
-  // NEW: optional but used when `to` is missing
+  // optional: used when `to` is missing
   message?: any;
   signature?: any;
 
@@ -82,6 +83,21 @@ const CONTRACT_ABI = parseAbi([
 ]);
 
 export async function POST(req: Request) {
+  // ✅ reqId for cross-checking in UI + Vercel logs
+  const reqId =
+    (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+
+  // ✅ Use console.error so it reliably shows in Vercel logs
+  console.error("[mint/voucher] HIT", {
+    reqId,
+    url: req.url,
+    method: "POST",
+    contentType: req.headers.get("content-type"),
+    origin: req.headers.get("origin"),
+    referer: req.headers.get("referer"),
+    ua: (req.headers.get("user-agent") ?? "").slice(0, 120),
+  });
+
   // Read raw body once
   const raw = await req.text();
 
@@ -104,7 +120,8 @@ export async function POST(req: Request) {
 
   // If JSON is invalid/empty, surface immediately
   if (!body) {
-    console.log("[mint/voucher] invalid json", {
+    console.error("[mint/voucher] invalid json", {
+      reqId,
       VERSION,
       mintAttemptId,
       parseError,
@@ -117,6 +134,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       {
+        reqId,
         version: VERSION,
         error: "Invalid JSON body",
         mintAttemptId,
@@ -141,6 +159,7 @@ export async function POST(req: Request) {
   if (!tokenUri) {
     return NextResponse.json(
       {
+        reqId,
         version: VERSION,
         error: "Missing `tokenUri`",
         mintAttemptId,
@@ -166,7 +185,8 @@ export async function POST(req: Request) {
       });
       to = recoveredTo;
     } catch (e: any) {
-      console.log("[mint/voucher] recover failed", {
+      console.error("[mint/voucher] recover failed", {
+        reqId,
         VERSION,
         mintAttemptId,
         err: e?.message ?? String(e),
@@ -189,8 +209,24 @@ export async function POST(req: Request) {
       }
     })();
 
+    console.error("[mint/voucher] missing/invalid to", {
+      reqId,
+      VERSION,
+      mintAttemptId,
+      receivedToType,
+      receivedToPreview,
+      hasMessage: !!msg,
+      hasSignature: !!sig,
+      contentType,
+      origin,
+      referer,
+      ua,
+      raw: raw?.slice(0, 400),
+    });
+
     return NextResponse.json(
       {
+        reqId,
         version: VERSION,
         error: "Missing or invalid `to` (and could not recover from signature)",
         mintAttemptId,
@@ -214,6 +250,7 @@ export async function POST(req: Request) {
     if (explicit && explicit.toLowerCase() !== recoveredTo.toLowerCase()) {
       return NextResponse.json(
         {
+          reqId,
           version: VERSION,
           error: "Signature address does not match `to`",
           mintAttemptId,
@@ -290,6 +327,7 @@ export async function POST(req: Request) {
     });
 
     return NextResponse.json({
+      reqId,
       version: VERSION,
       ok: true,
       mintAttemptId,
@@ -308,6 +346,7 @@ export async function POST(req: Request) {
     console.error("mint/voucher error:", e);
     return NextResponse.json(
       {
+        reqId,
         version: VERSION,
         error: e?.message || "Server error",
         mintAttemptId,
