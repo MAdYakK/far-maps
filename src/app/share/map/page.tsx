@@ -16,9 +16,6 @@ const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
-// Allow Travis to mint multiple for debugging
-const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as const;
-
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -298,24 +295,19 @@ export default function ShareMapPage() {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
 
-      // 1 mint per wallet for everyone except DEV
-      const isDev = account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
+      // ✅ Enforce 1 mint per wallet for EVERYONE (including you)
+      setMintStage("Checking mint status…");
+      const bal = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: farMapsMintAbi,
+        functionName: "balanceOf",
+        args: [account],
+      });
 
-      setMintStage(isDev ? "Dev mode: skipping 1-per-wallet check…" : "Checking mint status…");
-
-      if (!isDev) {
-        const bal = await publicClient.readContract({
-          address: CONTRACT_ADDRESS,
-          abi: farMapsMintAbi,
-          functionName: "balanceOf",
-          args: [account],
-        });
-
-        if (bal > BigInt(0)) {
-          setMintStage("");
-          setAlreadyMintedOpen(true);
-          return;
-        }
+      if (bal > BigInt(0)) {
+        setMintStage("");
+        setAlreadyMintedOpen(true);
+        return;
       }
 
       // Prepare (upload png + metadata)
@@ -339,9 +331,7 @@ export default function ShareMapPage() {
       // Voucher auth (user signature)
       setMintStage("Authorizing mint…");
 
-      const mintAttemptId = (
-        globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
-      ).toString();
+      const mintAttemptId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
 
       const message =
         `FarMaps mint authorization\n` +
@@ -449,7 +439,7 @@ export default function ShareMapPage() {
       setMintTxHash(hash as unknown as string);
       setMintStage(`Minted! Tx ${shortAddr(hash as any)}`);
 
-      // ✅ open share popup instead of auto-sharing
+      // open share popup instead of auto-sharing
       setSharePopupOpen(true);
     } catch (e: any) {
       setMintErr(e?.message || "Mint failed");
@@ -461,7 +451,6 @@ export default function ShareMapPage() {
 
   const topRightLabel = useMemo(() => {
     if (!fid) return "Loading…";
-    // Replace “both” with username (fallback to mode)
     const who = username?.trim() ? username.trim() : mode;
     return `FID ${fid} • ${who}`;
   }, [fid, username, mode]);
@@ -499,7 +488,7 @@ export default function ShareMapPage() {
             {minting ? "Minting…" : "Mint"}
           </BubbleButton>
 
-          {/* ✅ Removed Share button from top bar */}
+          {/* Removed Share button from top bar */}
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{topRightLabel}</div>
 
@@ -590,7 +579,7 @@ export default function ShareMapPage() {
                 />
               )}
 
-              {/* ✅ Share popup after mint (centered, bubble style) */}
+              {/* Share popup after mint */}
               {sharePopupOpen && mintedImageUrl ? (
                 <CenterBubblePopup
                   title="Mint complete!"
@@ -694,7 +683,7 @@ function CenterBubblePopup({
         style={{
           width: "min(92%, 420px)",
           borderRadius: 16,
-          background: "rgba(0,0,0,0.55)", // match top bar vibe
+          background: "rgba(0,0,0,0.55)",
           color: "white",
           padding: 12,
           boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
