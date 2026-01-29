@@ -16,6 +16,12 @@ const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
+// Miniapp link to include in the cast
+const MINIAPP_URL = "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps";
+
+// Allow dev address to mint multiple times (skip 1-per-wallet guard)
+const DEV_MULTIMINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6";
+
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -91,7 +97,7 @@ function normalizeAddr(v: any): `0x${string}` | null {
 
   if (typeof v === "string") s = v;
   else if (Array.isArray(v)) s = v[0];
-  else if (v && typeof v === "object") s = v.address ?? v.account ?? v?.[0];
+  else if (v && typeof v === "object") s = (v as any).address ?? (v as any).account ?? (v as any)?.[0];
 
   if (!s) return null;
 
@@ -129,6 +135,9 @@ export default function ShareMapPage() {
 
   // Already minted overlay
   const [alreadyMintedOpen, setAlreadyMintedOpen] = useState(false);
+
+  // Share popup (center)
+  const [sharePopupOpen, setSharePopupOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -199,17 +208,24 @@ export default function ShareMapPage() {
     return `${baseUrl}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
   }, [fid, imageSrc]);
 
-  async function shareCast() {
-    if (!fid || !imageAbsolute) return;
+  // Share the minted NFT image + miniapp link
+  async function shareMintedCast() {
+    if (!mintedImageUrl) {
+      setMintErr("No minted image found yet. Mint first, then share.");
+      return;
+    }
 
     try {
       setSharing(true);
       await sdk.actions.composeCast({
-        text: "My Farmap! Check out yours!",
-        embeds: [imageAbsolute, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
+        text: "I got my FarMap! Check out yours!",
+        embeds: [mintedImageUrl, MINIAPP_URL],
       });
+
+      // Hide popup after opening composer
+      setSharePopupOpen(false);
     } catch (e: any) {
-      setImgErr(e?.message || "Failed to share");
+      setMintErr(e?.message || "Failed to share");
     } finally {
       setSharing(false);
     }
@@ -222,6 +238,7 @@ export default function ShareMapPage() {
     setMintStage("");
     setMintedTokenUri("");
     setMintedImageUrl("");
+    setSharePopupOpen(false);
 
     try {
       setMinting(true);
@@ -277,19 +294,25 @@ export default function ShareMapPage() {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
 
-      // 4) 1 mint per wallet: check onchain balance
-      setMintStage("Checking mint status…");
-      const bal = await publicClient.readContract({
-        address: CONTRACT_ADDRESS,
-        abi: farMapsMintAbi,
-        functionName: "balanceOf",
-        args: [account],
-      });
+      // 4) 1 mint per wallet: check onchain balance (EXCEPT dev multi-mint address)
+      const isDevMulti = account.toLowerCase() === DEV_MULTIMINT_ADDRESS.toLowerCase();
 
-      if (bal > BigInt(0)) {
-        setMintStage("");
-        setAlreadyMintedOpen(true);
-        return;
+      if (!isDevMulti) {
+        setMintStage("Checking mint status…");
+        const bal = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: farMapsMintAbi,
+          functionName: "balanceOf",
+          args: [account],
+        });
+
+        if (bal > BigInt(0)) {
+          setMintStage("");
+          setAlreadyMintedOpen(true);
+          return;
+        }
+      } else {
+        setMintStage("Dev mode: multi-mint enabled…");
       }
 
       // 5) Prepare (upload png + metadata)
@@ -310,10 +333,12 @@ export default function ShareMapPage() {
       const tokenUri = prepJson.tokenUri;
       const imgUrl = prepJson.imageUrl;
 
-      // 6) Voucher (NEW: sign message so server can recover `to`)
+      // 6) Voucher (sign message so server can recover `to`)
       setMintStage("Authorizing mint…");
 
-      const mintAttemptId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+      const mintAttemptId = (
+        globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+      ).toString();
 
       const message =
         `FarMaps mint authorization\n` +
@@ -335,9 +360,10 @@ export default function ShareMapPage() {
       setMintStage("Fetching voucher…");
 
       const baseUrl = getBaseUrl(); // should be https://far-maps.vercel.app
-if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.location.origin)");
+      if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.location.origin)");
 
-        const vRes = await fetch(`${baseUrl}/api/mint/voucher`, {
+      // Cache-buster query param
+      const vRes = await fetch(`${baseUrl}/api/mint/voucher?cb=${encodeURIComponent(mintAttemptId)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -346,12 +372,12 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
         cache: "no-store",
         body: JSON.stringify({
           mintAttemptId,
-          to: String(account),
+          to: String(account).trim(),
           tokenUri,
           message,
           signature: userSig,
         }),
-        });
+      });
 
       const vText = await vRes.text();
       let vJson: any = null;
@@ -362,6 +388,11 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
       if (!vRes.ok || !vJson?.ok) {
         const detail = vText ? vText.slice(0, 1200) : `HTTP ${vRes.status}`;
         throw new Error(`Voucher failed: ${detail}`);
+      }
+
+      // 🔒 SANITY CHECK — voucher must be for the connected wallet
+      if (String(vJson?.voucher?.to || "").toLowerCase() !== account.toLowerCase()) {
+        throw new Error(`Voucher mismatch: voucher.to=${vJson?.voucher?.to} but wallet=${account}`);
       }
 
       // 7) Approve EXACTLY 1 mint
@@ -416,15 +447,8 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
       setMintedImageUrl(imgUrl);
       setMintStage(`Minted! Tx ${shortAddr(hash)}`);
 
-      // 9) Optional: auto-share minted image
-      try {
-        await sdk.actions.composeCast({
-          text: "I minted my Farmap 🗺️",
-          embeds: [imgUrl, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
-        });
-      } catch {
-        // ignore
-      }
+      // ✅ show share popup instead of auto-sharing
+      setSharePopupOpen(true);
     } catch (e: any) {
       setMintErr(e?.message || "Mint failed");
       setMintStage("");
@@ -432,6 +456,12 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
       setMinting(false);
     }
   }
+
+  const topRightLabel = useMemo(() => {
+    if (!fid) return "Loading…";
+    if (username && username.trim()) return `FID ${fid} • @${username.trim()}`;
+    return `FID ${fid}`;
+  }, [fid, username]);
 
   return (
     <main
@@ -466,13 +496,7 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
             {minting ? "Minting…" : "Mint"}
           </BubbleButton>
 
-          <BubbleButton onClick={shareCast} disabled={!fid || !imageAbsolute || sharing || minting}>
-            {sharing ? "Sharing…" : "Share"}
-          </BubbleButton>
-
-          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>
-            {fid ? `FID ${fid} • ${mode}` : "Loading…"}
-          </div>
+          <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{topRightLabel}</div>
 
           {mintStage ? (
             <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>{mintStage}</div>
@@ -547,12 +571,8 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
               {alreadyMintedOpen && (
                 <OverlayCard
                   title="Already minted."
-                  subtitle="Click to share"
+                  subtitle="Close"
                   onClose={() => setAlreadyMintedOpen(false)}
-                  onClick={() => {
-                    setAlreadyMintedOpen(false);
-                    void shareCast();
-                  }}
                 />
               )}
 
@@ -580,6 +600,18 @@ if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.locati
                   </div>
                 </div>
               ) : null}
+
+              {/* ✅ Share popup (centered over the map) */}
+              {sharePopupOpen && (
+                <SharePopup
+                  title="Mint complete!"
+                  subtitle="Share your FarMap to Farcaster"
+                  buttonText={sharing ? "Opening…" : "Share my FarMap!"}
+                  disabled={sharing || !mintedImageUrl}
+                  onShare={() => void shareMintedCast()}
+                  onClose={() => setSharePopupOpen(false)}
+                />
+              )}
             </>
           )}
         </div>
@@ -616,6 +648,100 @@ function BubbleButton({
     >
       {children}
     </button>
+  );
+}
+
+// Center share popup styled like the top bar
+function SharePopup({
+  title,
+  subtitle,
+  buttonText,
+  disabled,
+  onShare,
+  onClose,
+}: {
+  title: string;
+  subtitle?: string;
+  buttonText: string;
+  disabled?: boolean;
+  onShare: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 60,
+        display: "grid",
+        placeItems: "center",
+        padding: 14,
+        background: "rgba(0,0,0,0.20)",
+      }}
+    >
+      <div
+        style={{
+          width: "min(92%, 360px)",
+          borderRadius: 14,
+          background: "rgba(0,0,0,0.55)",
+          color: "white",
+          padding: 12,
+          boxShadow: "0 14px 40px rgba(0,0,0,0.30)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          position: "relative",
+        }}
+      >
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={onClose}
+          style={{
+            position: "absolute",
+            top: 10,
+            right: 10,
+            width: 26,
+            height: 26,
+            borderRadius: 999,
+            border: "1px solid rgba(255,255,255,0.25)",
+            background: "rgba(255,255,255,0.10)",
+            color: "white",
+            cursor: "pointer",
+            lineHeight: "24px",
+            fontWeight: 800,
+          }}
+        >
+          ×
+        </button>
+
+        <div style={{ fontWeight: 900, fontSize: 14 }}>{title}</div>
+        {subtitle ? <div style={{ fontSize: 12, opacity: 0.9 }}>{subtitle}</div> : null}
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={onShare}
+            disabled={!!disabled}
+            style={{
+              border: "1px solid rgba(255,255,255,0.22)",
+              background: disabled ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.18)",
+              color: "white",
+              padding: "9px 14px",
+              borderRadius: 999,
+              fontSize: 12,
+              cursor: disabled ? "not-allowed" : "pointer",
+              userSelect: "none",
+              opacity: disabled ? 0.6 : 1,
+              width: "100%",
+              fontWeight: 800,
+            }}
+          >
+            {buttonText}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
