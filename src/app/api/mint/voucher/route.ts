@@ -1,13 +1,12 @@
 // src/app/api/mint/voucher/route.ts
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic"; // ✅ avoid any caching weirdness
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http, parseAbi, recoverMessageAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
-const VERSION = "voucher-route-v5-reqid-errlog-recover-to";
+const VERSION = "voucher-route-v5-check-onchain-signer";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -25,7 +24,7 @@ type Body = {
   tokenUri?: any;
   tokenURI?: any;
 
-  // optional: used when `to` is missing
+  // optional: recover `to` when missing
   message?: any;
   signature?: any;
 
@@ -77,28 +76,14 @@ function normalizeSig(v: any): `0x${string}` | null {
   return s as `0x${string}`;
 }
 
+// ✅ includes signer() so we can validate env signer matches onchain signer
 const CONTRACT_ABI = parseAbi([
   "function nonces(address) view returns (uint256)",
   "function mintPrice() view returns (uint256)",
+  "function signer() view returns (address)",
 ]);
 
 export async function POST(req: Request) {
-  // ✅ reqId for cross-checking in UI + Vercel logs
-  const reqId =
-    (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
-
-  // ✅ Use console.error so it reliably shows in Vercel logs
-  console.error("[mint/voucher] HIT", {
-    reqId,
-    url: req.url,
-    method: "POST",
-    contentType: req.headers.get("content-type"),
-    origin: req.headers.get("origin"),
-    referer: req.headers.get("referer"),
-    ua: (req.headers.get("user-agent") ?? "").slice(0, 120),
-  });
-
-  // Read raw body once
   const raw = await req.text();
 
   const attemptIdHeader = req.headers.get("x-mint-attempt-id") ?? "(none)";
@@ -118,10 +103,8 @@ export async function POST(req: Request) {
 
   const mintAttemptId = String(body?.mintAttemptId ?? attemptIdHeader ?? "(none)");
 
-  // If JSON is invalid/empty, surface immediately
   if (!body) {
-    console.error("[mint/voucher] invalid json", {
-      reqId,
+    console.log("[mint/voucher] invalid json", {
       VERSION,
       mintAttemptId,
       parseError,
@@ -134,7 +117,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       {
-        reqId,
         version: VERSION,
         error: "Invalid JSON body",
         mintAttemptId,
@@ -159,7 +141,6 @@ export async function POST(req: Request) {
   if (!tokenUri) {
     return NextResponse.json(
       {
-        reqId,
         version: VERSION,
         error: "Missing `tokenUri`",
         mintAttemptId,
@@ -185,8 +166,7 @@ export async function POST(req: Request) {
       });
       to = recoveredTo;
     } catch (e: any) {
-      console.error("[mint/voucher] recover failed", {
-        reqId,
+      console.log("[mint/voucher] recover failed", {
         VERSION,
         mintAttemptId,
         err: e?.message ?? String(e),
@@ -194,7 +174,6 @@ export async function POST(req: Request) {
     }
   }
 
-  // If still missing, error with debug
   if (!to) {
     const receivedTo = body?.to;
     const receivedToType =
@@ -209,24 +188,8 @@ export async function POST(req: Request) {
       }
     })();
 
-    console.error("[mint/voucher] missing/invalid to", {
-      reqId,
-      VERSION,
-      mintAttemptId,
-      receivedToType,
-      receivedToPreview,
-      hasMessage: !!msg,
-      hasSignature: !!sig,
-      contentType,
-      origin,
-      referer,
-      ua,
-      raw: raw?.slice(0, 400),
-    });
-
     return NextResponse.json(
       {
-        reqId,
         version: VERSION,
         error: "Missing or invalid `to` (and could not recover from signature)",
         mintAttemptId,
@@ -244,13 +207,12 @@ export async function POST(req: Request) {
     );
   }
 
-  // If both are present, make sure recovered matches provided `to`
+  // If both are present, make sure recovered matches explicit `to`
   if (recoveredTo && body?.to) {
     const explicit = normalizeAddress(body.to);
     if (explicit && explicit.toLowerCase() !== recoveredTo.toLowerCase()) {
       return NextResponse.json(
         {
-          reqId,
           version: VERSION,
           error: "Signature address does not match `to`",
           mintAttemptId,
@@ -263,7 +225,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const contract = mustEnv("FARMAPS_CONTRACT") as `0x${string}`;
+    // ✅ IMPORTANT: make sure this matches the contract your frontend calls
+    const contract =
+      (process.env.FARMAPS_CONTRACT as `0x${string}` | undefined) ??
+      ("0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const);
+
     const rpcUrl = mustEnv("BASE_RPC_URL");
     const pk = mustEnv("VOUCHER_SIGNER_PRIVATE_KEY");
 
@@ -275,6 +241,37 @@ export async function POST(req: Request) {
       chain: base,
       transport: http(rpcUrl),
     });
+
+    // ✅ FAIL FAST if env signer doesn’t match the onchain signer
+    const onchainSigner = (await client.readContract({
+      address: contract,
+      abi: CONTRACT_ABI,
+      functionName: "signer",
+      args: [],
+    })) as `0x${string}`;
+
+    if (onchainSigner.toLowerCase() !== signerAccount.address.toLowerCase()) {
+      console.error("[mint/voucher] SIGNER MISMATCH", {
+        VERSION,
+        contract,
+        onchainSigner,
+        envSigner: signerAccount.address,
+      });
+
+      return NextResponse.json(
+        {
+          version: VERSION,
+          error: "Signer mismatch: contract.signer != env private key address",
+          contract,
+          onchainSigner,
+          envSigner: signerAccount.address,
+          hint:
+            "Fix VOUCHER_SIGNER_PRIVATE_KEY OR call setSigner() on the contract to set it to envSigner.",
+          mintAttemptId,
+        },
+        { status: 500 }
+      );
+    }
 
     const [nonce, price] = await Promise.all([
       client.readContract({
@@ -301,7 +298,6 @@ export async function POST(req: Request) {
       deadline,
     } as const;
 
-    // Must match contract: EIP712("Far Maps", "1")
     const domain = {
       name: "Far Maps",
       version: "1",
@@ -327,12 +323,12 @@ export async function POST(req: Request) {
     });
 
     return NextResponse.json({
-      reqId,
       version: VERSION,
       ok: true,
       mintAttemptId,
       to,
       recoveredTo,
+      contract,
       voucher: {
         to: voucher.to,
         tokenURI: voucher.tokenURI,
@@ -346,7 +342,6 @@ export async function POST(req: Request) {
     console.error("mint/voucher error:", e);
     return NextResponse.json(
       {
-        reqId,
         version: VERSION,
         error: e?.message || "Server error",
         mintAttemptId,
