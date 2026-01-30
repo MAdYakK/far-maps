@@ -98,59 +98,12 @@ function normalizeAddr(v: any): `0x${string}` | null {
 
   if (typeof v === "string") s = v;
   else if (Array.isArray(v)) s = v[0];
-  else if (v && typeof v === "object")
-    s = (v as any).address ?? (v as any).account ?? (v as any)?.[0];
+  else if (v && typeof v === "object") s = (v as any).address ?? (v as any).account ?? (v as any)?.[0];
 
   if (!s) return null;
 
   const trimmed = String(s).trim();
   return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? (trimmed as `0x${string}`) : null;
-}
-
-// ─────────────────────────────────────────────
-// ✅ Allowance / TX settle helpers (fix intermittent post-approve mint errors)
-// ─────────────────────────────────────────────
-async function sleep(ms: number) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitForAllowance({
-  publicClient,
-  account,
-  spender,
-  token,
-  required,
-  timeoutMs = 20000,
-  pollMs = 750,
-}: {
-  publicClient: any;
-  account: `0x${string}`;
-  spender: `0x${string}`;
-  token: `0x${string}`;
-  required: bigint;
-  timeoutMs?: number;
-  pollMs?: number;
-}) {
-  const start = Date.now();
-
-  while (true) {
-    const allowanceNow = (await publicClient.readContract({
-      address: token,
-      abi: erc20Abi,
-      functionName: "allowance",
-      args: [account, spender],
-    })) as bigint;
-
-    if (allowanceNow >= required) return allowanceNow;
-
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(
-        `USDC allowance not updated yet (need ${required.toString()}, got ${allowanceNow.toString()}). Please try again.`
-      );
-    }
-
-    await sleep(pollMs);
-  }
 }
 
 export default function ShareMapPage() {
@@ -195,8 +148,7 @@ export default function ShareMapPage() {
       const qFid = sp.get("fid");
       const qMode = (sp.get("mode") as Mode | null) ?? null;
 
-      if (qMode === "followers" || qMode === "following" || qMode === "both")
-        setMode(qMode);
+      if (qMode === "followers" || qMode === "following" || qMode === "both") setMode(qMode);
 
       if (sp.get("minScore")) setMinScore(sp.get("minScore")!);
       if (sp.get("limitEach")) setLimitEach(sp.get("limitEach")!);
@@ -249,17 +201,7 @@ export default function ShareMapPage() {
       `&w=1000&h=1000` +
       `&v=${encodeURIComponent(String(reloadNonce))}`
     );
-  }, [
-    fid,
-    mode,
-    minScore,
-    limitEach,
-    maxEach,
-    concurrency,
-    hubPageSize,
-    hubDelayMs,
-    reloadNonce,
-  ]);
+  }, [fid, mode, minScore, limitEach, maxEach, concurrency, hubPageSize, hubDelayMs, reloadNonce]);
 
   const imageAbsolute = useMemo(() => {
     if (!fid) return "";
@@ -324,8 +266,7 @@ export default function ShareMapPage() {
         transport: custom(ethProvider as any),
       });
 
-      const rpc =
-        process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
+      const rpc = process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
       const publicClient = createPublicClient({
         chain: base,
         transport: http(rpc),
@@ -341,10 +282,7 @@ export default function ShareMapPage() {
 
       if (!account) {
         try {
-          const accts = await (ethProvider as any).request?.({
-            method: "eth_accounts",
-            params: [],
-          });
+          const accts = await (ethProvider as any).request?.({ method: "eth_accounts", params: [] });
           account = normalizeAddr(accts);
         } catch {}
       }
@@ -360,17 +298,14 @@ export default function ShareMapPage() {
       }
 
       if (!account) {
-        throw new Error(
-          "No wallet address returned from provider (eth_accounts / eth_requestAccounts)."
-        );
+        throw new Error("No wallet address returned from provider (eth_accounts / eth_requestAccounts).");
       }
       if (!isAddress(account)) {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
 
       // 1 mint per wallet for everyone except DEV (only if DEV_MODE is true)
-      const isDev =
-        DEV_MODE && account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
+      const isDev = DEV_MODE && account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
 
       setMintStage(isDev ? "Dev mode: skipping 1-per-wallet check…" : "Checking mint status…");
 
@@ -410,9 +345,7 @@ export default function ShareMapPage() {
       // Voucher auth (user signature)
       setMintStage("Authorizing mint…");
 
-      const mintAttemptId = (
-        globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
-      ).toString();
+      const mintAttemptId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
 
       const message =
         `FarMaps mint authorization\n` +
@@ -433,27 +366,23 @@ export default function ShareMapPage() {
       setMintStage("Fetching voucher…");
 
       const baseUrl = getBaseUrl();
-      if (!baseUrl)
-        throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.location.origin)");
+      if (!baseUrl) throw new Error("Missing baseUrl (NEXT_PUBLIC_URL or window.location.origin)");
 
-      const vRes = await fetch(
-        `${baseUrl}/api/mint/voucher?cb=${encodeURIComponent(mintAttemptId)}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-mint-attempt-id": mintAttemptId,
-          },
-          cache: "no-store",
-          body: JSON.stringify({
-            mintAttemptId,
-            to: String(account).trim(),
-            tokenUri,
-            message,
-            signature: userSig,
-          }),
-        }
-      );
+      const vRes = await fetch(`${baseUrl}/api/mint/voucher?cb=${encodeURIComponent(mintAttemptId)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mint-attempt-id": mintAttemptId,
+        },
+        cache: "no-store",
+        body: JSON.stringify({
+          mintAttemptId,
+          to: String(account).trim(),
+          tokenUri,
+          message,
+          signature: userSig,
+        }),
+      });
 
       const vText = await vRes.text();
       let vJson: any = null;
@@ -471,23 +400,20 @@ export default function ShareMapPage() {
         throw new Error(`Voucher mismatch: voucher.to=${vJson?.voucher?.to} but wallet=${account}`);
       }
 
-      // ─────────────────────────────────────────────
-      // ✅ Approve USDC (if needed) + confirm allowance update before mint
-      // ─────────────────────────────────────────────
+      // Approve USDC (if needed)
       setMintStage("Approving USDC…");
-
-      const onchainPrice = (await publicClient.readContract({
+      const onchainPrice = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
         abi: farMapsMintAbi,
         functionName: "mintPrice",
-      })) as bigint;
+      });
 
-      let allowance = (await publicClient.readContract({
+      const allowance = await publicClient.readContract({
         address: USDC_ADDRESS,
         abi: erc20Abi,
         functionName: "allowance",
         args: [account, CONTRACT_ADDRESS],
-      })) as bigint;
+      });
 
       if (allowance < onchainPrice) {
         const approveHash = await walletClient.writeContract({
@@ -498,34 +424,11 @@ export default function ShareMapPage() {
           account,
         });
 
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: approveHash });
-        if (receipt.status !== "success") {
-          throw new Error("USDC approve transaction failed.");
-        }
-
-        // Small settle helps some RPC/provider combos
-        await sleep(500);
-
-        // ✅ Wait until allowance is actually updated on-chain (as served by RPC)
-        await waitForAllowance({
-          publicClient,
-          account,
-          spender: CONTRACT_ADDRESS,
-          token: USDC_ADDRESS,
-          required: onchainPrice,
-          timeoutMs: 20000,
-          pollMs: 750,
-        });
-
-        allowance = onchainPrice;
+        await publicClient.waitForTransactionReceipt({ hash: approveHash });
       }
 
       // Mint
       setMintStage("Minting…");
-
-      // Optional tiny settle right before mint (helps some wallets that simulate quickly)
-      await sleep(250);
-
       const hash = await walletClient.writeContract({
         address: CONTRACT_ADDRESS,
         abi: farMapsMintAbi,
@@ -543,10 +446,7 @@ export default function ShareMapPage() {
         account,
       });
 
-      const mintReceipt = await publicClient.waitForTransactionReceipt({ hash });
-      if (mintReceipt.status !== "success") {
-        throw new Error("Mint transaction failed.");
-      }
+      await publicClient.waitForTransactionReceipt({ hash });
 
       setMintedTokenUri(tokenUri);
       setMintedImageUrl(imgUrl);
@@ -599,40 +499,20 @@ export default function ShareMapPage() {
           <BubbleButton onClick={() => router.push("/")}>Home</BubbleButton>
 
           <BubbleButton onClick={mintNow} disabled={!fid || minting || imgOk === false || loadingImg}>
-            {minting ? "Minting…" : "Mint"}
+            {minting ? "Minting…" : "Mint & Share"}
           </BubbleButton>
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{topRightLabel}</div>
 
           {mintStage ? (
-            <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>
-              {mintStage}
-            </div>
+            <div style={{ width: "100%", fontSize: 12, opacity: 0.95, marginTop: 4 }}>{mintStage}</div>
           ) : null}
 
           {mintErr ? (
-            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>
-              {mintErr}
-            </div>
+            <div style={{ width: "100%", fontSize: 12, color: "#ffb4b4", marginTop: 4 }}>{mintErr}</div>
           ) : null}
 
-          {mintedTokenUri ? (
-            <div style={{ width: "100%", fontSize: 12, opacity: 0.9, marginTop: 4 }}>
-              TokenURI: {mintedTokenUri}
-              {mintedImageUrl ? (
-                <>
-                  <br />
-                  Image: {mintedImageUrl}
-                </>
-              ) : null}
-              {mintTxHash ? (
-                <>
-                  <br />
-                  Tx: {shortAddr(mintTxHash)}
-                </>
-              ) : null}
-            </div>
-          ) : null}
+          {/* ✅ Removed the TokenURI/Image/Tx debug block */}
         </div>
       </div>
 
