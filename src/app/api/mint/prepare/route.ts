@@ -30,6 +30,19 @@ function gatewaysFor(id: string) {
   };
 }
 
+// ✅ Restore FID rarity buckets
+function fidRarity(fid: number): string {
+  if (fid >= 1 && fid <= 100) return "First 100";
+  if (fid <= 1_000) return "sub 1k";
+  if (fid <= 10_000) return "sub 10k";
+  if (fid <= 20_000) return "sub 20k";
+  if (fid <= 50_000) return "sub 50k";
+  if (fid <= 100_000) return "sub 100k";
+  if (fid <= 500_000) return "sub 500k";
+  if (fid <= 1_000_000) return "sub 1m";
+  return "1m+";
+}
+
 // Normalize anything numeric-ish to bigint
 function toBigInt(v: any): bigint {
   if (typeof v === "bigint") return v;
@@ -95,8 +108,7 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const reqId =
-    (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+  const reqId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
 
   // Use console.error so it reliably shows in Vercel logs
   console.error("[mint/prepare] HIT", {
@@ -155,6 +167,8 @@ export async function POST(req: Request) {
       );
     }
 
+    const rarity = fidRarity(fid);
+
     // 1) Fetch PNG from existing generator
     const baseUrl = getBaseUrl(req);
     if (!baseUrl) {
@@ -169,9 +183,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const imageUrl = `${baseUrl}/api/map-image?fid=${encodeURIComponent(
-      String(fid)
-    )}&mode=both&w=1000&h=1000&v=${Date.now()}`;
+    const imageUrl = `${baseUrl}/api/map-image?fid=${encodeURIComponent(String(fid))}&mode=both&w=1000&h=1000&v=${Date.now()}`;
 
     const imgRes = await fetch(imageUrl, { cache: "no-store" });
     if (!imgRes.ok) {
@@ -194,9 +206,7 @@ export async function POST(req: Request) {
     const pngBuffer = Buffer.from(await imgRes.arrayBuffer());
 
     // 2) Init Irys (Base) + force RPC
-    const irys = await Uploader(BaseEth)
-      .withRpc(mustEnv("BASE_RPC_URL"))
-      .withWallet(mustEnv("IRYS_PRIVATE_KEY"));
+    const irys = await Uploader(BaseEth).withRpc(mustEnv("BASE_RPC_URL")).withWallet(mustEnv("IRYS_PRIVATE_KEY"));
 
     const addr = await readIrysAddress(irys);
     let loadedBal = await readLoadedBalance(irys);
@@ -214,6 +224,7 @@ export async function POST(req: Request) {
       external_url: "https://far-maps.vercel.app",
       attributes: [
         { trait_type: "FID", value: fid },
+        { trait_type: "FID Rarity", value: rarity }, // ✅ added back
         ...(username ? [{ trait_type: "Username", value: username }] : []),
       ],
     };
@@ -242,6 +253,7 @@ export async function POST(req: Request) {
         { name: "App-Name", value: "FarMaps" },
         { name: "Type", value: "Farmap" },
         { name: "FID", value: String(fid) },
+        { name: "FID-Rarity", value: rarity }, // ✅ added back
         ...(username ? [{ name: "Username", value: username }] : []),
       ],
     });
@@ -256,6 +268,7 @@ export async function POST(req: Request) {
       external_url: "https://far-maps.vercel.app",
       attributes: [
         { trait_type: "FID", value: fid },
+        { trait_type: "FID Rarity", value: rarity }, // ✅ added back
         ...(username ? [{ trait_type: "Username", value: username }] : []),
       ],
     };
@@ -266,6 +279,7 @@ export async function POST(req: Request) {
         { name: "App-Name", value: "FarMaps" },
         { name: "Type", value: "Metadata" },
         { name: "FID", value: String(fid) },
+        { name: "FID-Rarity", value: rarity }, // ✅ added back
         ...(username ? [{ name: "Username", value: username }] : []),
       ],
     });
@@ -278,6 +292,7 @@ export async function POST(req: Request) {
       version: VERSION,
       fid,
       username,
+      rarity, // ✅ handy debug field (optional, but nice)
       imageUrl: imgUrls.irysGateway,
       tokenUri: metaUrls.irysGateway,
       imgTx: imgReceipt.id,

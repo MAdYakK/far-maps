@@ -114,6 +114,22 @@ function safeHttpsUrl(s: string) {
   }
 }
 
+// ✅ NEW: frame color based on FID rarity
+function fidFrameColor(fid: number) {
+  // gold / silver / bronze tiers
+  if (fid >= 1 && fid <= 100) return "#8a6a00";     // dark gold
+  if (fid <= 1_000) return "#e7c65a";               // light gold
+  if (fid <= 10_000) return "#c0c0c8";              // silver
+  if (fid <= 20_000) return "#b87333";              // bronze
+
+  // purples get lighter as range goes up
+  if (fid <= 50_000) return "#5b21b6";              // deep purple
+  if (fid <= 100_000) return "#6d28d9";             // purple
+  if (fid <= 500_000) return "#7c3aed";             // lighter purple
+  if (fid <= 1_000_000) return "#8b5cf6";           // light purple
+  return "#a78bfa";                                 // lightest purple
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const sp = url.searchParams;
@@ -209,6 +225,9 @@ export async function GET(req: Request) {
 
     const bounds = computeBounds(pointsRaw.map((p) => ({ lat: p.lat, lng: p.lng })));
 
+    // ✅ NEW: pick frame color based on viewer fid
+    const frameColor = fidFrameColor(fid);
+
     const html = `<!doctype html>
 <html>
 <head>
@@ -216,13 +235,24 @@ export async function GET(req: Request) {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    :root{ --purple:#cdb7ff; --card: rgba(255,255,255,0.35); }
-    html, body { margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden; background:var(--purple);
+    /* ✅ frame color now dynamic based on FID */
+    :root{ --frame:${frameColor}; --card: rgba(255,255,255,0.35); }
+
+    html, body {
+      margin:0; padding:0; width:${w}px; height:${h}px; overflow:hidden;
+      background:var(--frame);
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
     }
-    #frame{ position:relative; width:100%; height:100%; padding:14px; box-sizing:border-box; background:var(--purple); }
-    #card{ position:relative; width:100%; height:100%; border-radius:28px; background:var(--card);
-      box-shadow:0 18px 60px rgba(0,0,0,0.22); overflow:hidden;
+    #frame{
+      position:relative; width:100%; height:100%;
+      padding:14px; box-sizing:border-box;
+      background:var(--frame);
+    }
+    #card{
+      position:relative; width:100%; height:100%;
+      border-radius:28px; background:var(--card);
+      box-shadow:0 18px 60px rgba(0,0,0,0.22);
+      overflow:hidden;
     }
 
     /* ✅ MAP FILLS THE ENTIRE CARD */
@@ -301,8 +331,8 @@ export async function GET(req: Request) {
 
       <div id="pfp" class="overlay">
         <div id="pfpInner" class="${pfpSafe ? "hasImg" : ""}" style="${
-      pfpSafe ? `background-image:url('${pfpSafe.replace(/'/g, "%27")}')` : ""
-    }">
+          pfpSafe ? `background-image:url('${pfpSafe.replace(/'/g, "%27")}')` : ""
+        }">
           <div id="pfpFallback" style="${pfpSafe ? "display:none" : ""}">
             ${escHtml(String(username || "u").slice(0, 1))}
           </div>
@@ -429,8 +459,7 @@ export async function GET(req: Request) {
             headless: true,
             defaultViewport: { width: w, height: h },
             executablePath:
-              process.env.CHROME_PATH ||
-              "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+              process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
             args: [
               "--no-sandbox",
               "--disable-setuid-sandbox",
