@@ -83,27 +83,28 @@ function forceGatewayTokenUri(input: string): string {
   const raw = (input || "").trim();
   if (!raw) return "";
 
-  // If someone sends a bare Irys/Arweave txid, normalize it to gateway
-  // Irys/Arweave IDs are typically base64url-ish; this is intentionally permissive.
   const looksLikeTxId = /^[A-Za-z0-9_-]{32,}$/.test(raw) && !raw.startsWith("http");
-  if (looksLikeTxId) {
-    return `https://gateway.irys.xyz/${raw}`;
-  }
+  if (looksLikeTxId) return `https://arweave.net/${raw}`;
 
-  // If it's a URL, normalize uploader -> gateway
   try {
     const u = new URL(raw);
+    const pathId = u.pathname.replace(/^\/+/, "").split("/")[0];
 
-    if (u.hostname === "uploader.irys.xyz") {
-      return `https://gateway.irys.xyz${u.pathname}`;
+    // If it's any irys host, canonicalize to arweave.net/<id>
+    if (
+      u.hostname === "gateway.irys.xyz" ||
+      u.hostname === "uploader.irys.xyz" ||
+      u.hostname.endsWith(".irys.xyz")
+    ) {
+      if (pathId) return `https://arweave.net/${pathId}`;
     }
 
     return raw;
   } catch {
-    // Not a URL and not a txid; return original
     return raw;
   }
 }
+
 
 function normalizeTokenUri(body: Body): string {
   const raw =
