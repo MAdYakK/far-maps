@@ -289,12 +289,12 @@ export async function GET(req: Request) {
       <div id="legend" class="overlay">
         <div id="legendTitle">
           <div>Legend</div>
-          <div style="opacity:0.9;font-weight:800">${legend.pins} pins • ${legend.users} users</div>
+          <div style="opacity:0.9;font-weight:800">${legend.pins} pins • ${legend.users} casters</div>
         </div>
-        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 user</div><div style="font-weight:900">${legend.b1} pins</div></div>
-        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 users</div><div style="font-weight:900">${legend.b2} pins</div></div>
-        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 users</div><div style="font-weight:900">${legend.b4} pins</div></div>
-        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ users</div><div style="font-weight:900">${legend.b8} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b1")}"></span>1 caster</div><div style="font-weight:900">${legend.b1} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b2")}"></span>2–3 casters</div><div style="font-weight:900">${legend.b2} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b4")}"></span>4–7 casters</div><div style="font-weight:900">${legend.b4} pins</div></div>
+        <div class="row"><div class="left"><span class="dot" style="background:${bucketColor("b8")}"></span>8+ casters</div><div style="font-weight:900">${legend.b8} pins</div></div>
       </div>
 
       <div id="watermark" class="overlay">Far Maps • ${escHtml(String(username))}</div>
@@ -439,7 +439,6 @@ export async function GET(req: Request) {
             ],
           }
     );
-
 
     try {
       const page = await browser.newPage();
