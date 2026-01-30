@@ -6,7 +6,7 @@ import { createPublicClient, http, parseAbi, recoverMessageAddress } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
-const VERSION = "voucher-route-v6-force-gateway-tokenuri";
+const VERSION = "voucher-route-v5-check-onchain-signer";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -31,15 +31,6 @@ type Body = {
   deadlineSeconds?: any;
   [k: string]: any;
 };
-
-function json(data: any, status = 200) {
-  return NextResponse.json(data, {
-    status,
-    headers: {
-      "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
-    },
-  });
-}
 
 function normalizeAddress(input: any): `0x${string}` | null {
   let v: any = input;
@@ -68,44 +59,6 @@ function normalizeAddress(input: any): `0x${string}` | null {
   return s as `0x${string}`;
 }
 
-function normalizeSig(v: any): `0x${string}` | null {
-  if (typeof v !== "string") return null;
-  const s = v.trim();
-  if (!/^0x[0-9a-fA-F]+$/.test(s)) return null;
-  return s as `0x${string}`;
-}
-
-/**
- * ✅ Convert anything that might be "uploader" or a bare txid into a stable public gateway URL.
- * This prevents BaseScan / tokenURI from showing unreachable uploader URLs.
- */
-function forceGatewayTokenUri(input: string): string {
-  const raw = (input || "").trim();
-  if (!raw) return "";
-
-  const looksLikeTxId = /^[A-Za-z0-9_-]{32,}$/.test(raw) && !raw.startsWith("http");
-  if (looksLikeTxId) return `https://arweave.net/${raw}`;
-
-  try {
-    const u = new URL(raw);
-    const pathId = u.pathname.replace(/^\/+/, "").split("/")[0];
-
-    // If it's any irys host, canonicalize to arweave.net/<id>
-    if (
-      u.hostname === "gateway.irys.xyz" ||
-      u.hostname === "uploader.irys.xyz" ||
-      u.hostname.endsWith(".irys.xyz")
-    ) {
-      if (pathId) return `https://arweave.net/${pathId}`;
-    }
-
-    return raw;
-  } catch {
-    return raw;
-  }
-}
-
-
 function normalizeTokenUri(body: Body): string {
   const raw =
     typeof body.tokenUri === "string"
@@ -113,9 +66,14 @@ function normalizeTokenUri(body: Body): string {
       : typeof body.tokenURI === "string"
         ? body.tokenURI
         : "";
+  return raw.trim();
+}
 
-  // ✅ Force gateway normalization here
-  return forceGatewayTokenUri(raw);
+function normalizeSig(v: any): `0x${string}` | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!/^0x[0-9a-fA-F]+$/.test(s)) return null;
+  return s as `0x${string}`;
 }
 
 // ✅ includes signer() so we can validate env signer matches onchain signer
@@ -157,7 +115,7 @@ export async function POST(req: Request) {
       ua,
     });
 
-    return json(
+    return NextResponse.json(
       {
         version: VERSION,
         error: "Invalid JSON body",
@@ -169,7 +127,7 @@ export async function POST(req: Request) {
         ua,
         rawBody: (raw ?? "").slice(0, 1200),
       },
-      400
+      { status: 400 }
     );
   }
 
@@ -181,14 +139,14 @@ export async function POST(req: Request) {
       : 15 * 60;
 
   if (!tokenUri) {
-    return json(
+    return NextResponse.json(
       {
         version: VERSION,
         error: "Missing `tokenUri`",
         mintAttemptId,
         hint: "Send JSON { tokenUri: 'https://...' } (and optionally message+signature).",
       },
-      400
+      { status: 400 }
     );
   }
 
@@ -230,7 +188,7 @@ export async function POST(req: Request) {
       }
     })();
 
-    return json(
+    return NextResponse.json(
       {
         version: VERSION,
         error: "Missing or invalid `to` (and could not recover from signature)",
@@ -245,7 +203,7 @@ export async function POST(req: Request) {
         ua,
         rawBody: (raw ?? "").slice(0, 1200),
       },
-      400
+      { status: 400 }
     );
   }
 
@@ -253,7 +211,7 @@ export async function POST(req: Request) {
   if (recoveredTo && body?.to) {
     const explicit = normalizeAddress(body.to);
     if (explicit && explicit.toLowerCase() !== recoveredTo.toLowerCase()) {
-      return json(
+      return NextResponse.json(
         {
           version: VERSION,
           error: "Signature address does not match `to`",
@@ -261,12 +219,13 @@ export async function POST(req: Request) {
           explicitTo: explicit,
           recoveredTo,
         },
-        400
+        { status: 400 }
       );
     }
   }
 
   try {
+    // ✅ IMPORTANT: make sure this matches the contract your frontend calls
     const contract =
       (process.env.FARMAPS_CONTRACT as `0x${string}` | undefined) ??
       ("0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const);
@@ -299,7 +258,7 @@ export async function POST(req: Request) {
         envSigner: signerAccount.address,
       });
 
-      return json(
+      return NextResponse.json(
         {
           version: VERSION,
           error: "Signer mismatch: contract.signer != env private key address",
@@ -310,7 +269,7 @@ export async function POST(req: Request) {
             "Fix VOUCHER_SIGNER_PRIVATE_KEY OR call setSigner() on the contract to set it to envSigner.",
           mintAttemptId,
         },
-        500
+        { status: 500 }
       );
     }
 
@@ -331,7 +290,6 @@ export async function POST(req: Request) {
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
 
-    // ✅ tokenURI we sign is ALWAYS normalized gateway
     const voucher = {
       to,
       tokenURI: tokenUri,
@@ -364,14 +322,13 @@ export async function POST(req: Request) {
       message: voucher,
     });
 
-    return json({
+    return NextResponse.json({
       version: VERSION,
       ok: true,
       mintAttemptId,
       to,
       recoveredTo,
       contract,
-      tokenUriNormalized: tokenUri, // ✅ debugging aid
       voucher: {
         to: voucher.to,
         tokenURI: voucher.tokenURI,
@@ -383,14 +340,14 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     console.error("mint/voucher error:", e);
-    return json(
+    return NextResponse.json(
       {
         version: VERSION,
         error: e?.message || "Server error",
         mintAttemptId,
         detail: String(e?.stack || "").slice(0, 2000),
       },
-      500
+      { status: 500 }
     );
   }
 }
