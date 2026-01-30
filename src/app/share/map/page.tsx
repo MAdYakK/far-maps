@@ -106,6 +106,56 @@ function normalizeAddr(v: any): `0x${string}` | null {
   return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? (trimmed as `0x${string}`) : null;
 }
 
+// ─────────────────────────────────────────────
+// ✅ Robust tx settling helpers (fix approve→mint flakiness)
+// ─────────────────────────────────────────────
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+async function waitReceiptAndSettle(
+  publicClient: any,
+  hash: `0x${string}`,
+  label: string,
+  confirmations = 1
+) {
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash,
+    confirmations,
+    timeout: 120_000,
+  });
+
+  // Some RPCs/webviews need a beat after receipt to reflect state reads
+  await sleep(600);
+
+  if (receipt.status !== "success") {
+    throw new Error(`${label} transaction failed`);
+  }
+  return receipt;
+}
+
+async function waitForAllowance(
+  publicClient: any,
+  owner: `0x${string}`,
+  spender: `0x${string}`,
+  required: bigint,
+  maxMs = 30_000
+) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const a = (await publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [owner, spender],
+    })) as bigint;
+
+    if (a >= required) return a;
+    await sleep(750);
+  }
+  throw new Error("Allowance did not update in time after approve. Please try again.");
+}
+
 export default function ShareMapPage() {
   const router = useRouter();
 
@@ -400,31 +450,44 @@ export default function ShareMapPage() {
         throw new Error(`Voucher mismatch: voucher.to=${vJson?.voucher?.to} but wallet=${account}`);
       }
 
-      // Approve USDC (if needed)
+      // ─────────────────────────────────────────────
+      // ✅ Approve USDC (if needed) — robust settle + allowance poll
+      // ─────────────────────────────────────────────
       setMintStage("Approving USDC…");
-      const onchainPrice = await publicClient.readContract({
+
+      const onchainPrice = (await publicClient.readContract({
         address: CONTRACT_ADDRESS,
         abi: farMapsMintAbi,
         functionName: "mintPrice",
-      });
+      })) as bigint;
 
-      const allowance = await publicClient.readContract({
+      let allowance = (await publicClient.readContract({
         address: USDC_ADDRESS,
         abi: erc20Abi,
         functionName: "allowance",
         args: [account, CONTRACT_ADDRESS],
-      });
+      })) as bigint;
 
       if (allowance < onchainPrice) {
-        const approveHash = await walletClient.writeContract({
+        const approveAmount = onchainPrice;
+
+        setMintStage("Approving USDC… (confirm in wallet)");
+        const approveHash = (await walletClient.writeContract({
           address: USDC_ADDRESS,
           abi: erc20Abi,
           functionName: "approve",
-          args: [CONTRACT_ADDRESS, onchainPrice],
+          args: [CONTRACT_ADDRESS, approveAmount],
           account,
-        });
+        })) as `0x${string}`;
 
-        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+        setMintStage("Approving USDC… (waiting for confirmation)");
+        await waitReceiptAndSettle(publicClient, approveHash, "USDC approve", 1);
+
+        setMintStage("Approving USDC… (verifying allowance)");
+        allowance = await waitForAllowance(publicClient, account, CONTRACT_ADDRESS, onchainPrice, 30_000);
+
+        // extra settle (helps some embedded RPCs)
+        await sleep(500);
       }
 
       // Mint
@@ -446,7 +509,8 @@ export default function ShareMapPage() {
         account,
       });
 
-      await publicClient.waitForTransactionReceipt({ hash });
+      setMintStage("Minting… (waiting for confirmation)");
+      await waitReceiptAndSettle(publicClient, hash as `0x${string}`, "Mint", 1);
 
       setMintedTokenUri(tokenUri);
       setMintedImageUrl(imgUrl);
