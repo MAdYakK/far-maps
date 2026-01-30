@@ -16,6 +16,15 @@ const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
+// ─────────────────────────────────────────────
+// DEV MODE (toggle on/off)
+// ─────────────────────────────────────────────
+const DEV_MODE = false; // ✅ set true ONLY while debugging
+const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as const;
+
+// Miniapp link to include in shares
+const MINIAPP_LINK = "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps";
+
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -208,7 +217,7 @@ export default function ShareMapPage() {
       setSharingMinted(true);
       await sdk.actions.composeCast({
         text: "I got my FarMap! Check out yours!",
-        embeds: [mintedImageUrl, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
+        embeds: [mintedImageUrl, MINIAPP_LINK],
       });
       setSharePopupOpen(false);
     } catch (e: any) {
@@ -218,7 +227,7 @@ export default function ShareMapPage() {
     }
   }
 
-  // Used only for the "Already minted" overlay (shares the current map image if we don't have NFT image)
+  // Used only for the "Already minted" overlay (shares the current map image)
   async function shareCurrentMapCast() {
     if (!imageAbsolute) return;
 
@@ -226,7 +235,7 @@ export default function ShareMapPage() {
       setSharingMinted(true);
       await sdk.actions.composeCast({
         text: "I got my FarMap! Check out yours!",
-        embeds: [imageAbsolute, "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps"],
+        embeds: [imageAbsolute, MINIAPP_LINK],
       });
       setAlreadyMintedOpen(false);
     } catch (e: any) {
@@ -295,19 +304,24 @@ export default function ShareMapPage() {
         throw new Error(`Invalid wallet address from provider: ${String(account)}`);
       }
 
-      // ✅ Enforce 1 mint per wallet for EVERYONE (including you)
-      setMintStage("Checking mint status…");
-      const bal = await publicClient.readContract({
-        address: CONTRACT_ADDRESS,
-        abi: farMapsMintAbi,
-        functionName: "balanceOf",
-        args: [account],
-      });
+      // 1 mint per wallet for everyone except DEV (only if DEV_MODE is true)
+      const isDev = DEV_MODE && account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
 
-      if (bal > BigInt(0)) {
-        setMintStage("");
-        setAlreadyMintedOpen(true);
-        return;
+      setMintStage(isDev ? "Dev mode: skipping 1-per-wallet check…" : "Checking mint status…");
+
+      if (!isDev) {
+        const bal = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: farMapsMintAbi,
+          functionName: "balanceOf",
+          args: [account],
+        });
+
+        if (bal > BigInt(0)) {
+          setMintStage("");
+          setAlreadyMintedOpen(true);
+          return;
+        }
       }
 
       // Prepare (upload png + metadata)
@@ -488,8 +502,6 @@ export default function ShareMapPage() {
             {minting ? "Minting…" : "Mint"}
           </BubbleButton>
 
-          {/* Removed Share button from top bar */}
-
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{topRightLabel}</div>
 
           {mintStage ? (
@@ -567,11 +579,11 @@ export default function ShareMapPage() {
               {/* Loading overlay */}
               {loadingImg && <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />}
 
-              {/* Already minted overlay */}
+              {/* ✅ Already minted overlay (click/tap anywhere on it to share) */}
               {alreadyMintedOpen && (
                 <OverlayCard
-                  title="Already minted."
-                  subtitle="Tap to share your current map"
+                  title="ALREADY MINTED!"
+                  subtitle="Tap to share your FarMap!"
                   onClose={() => setAlreadyMintedOpen(false)}
                   onClick={() => {
                     void shareCurrentMapCast();
