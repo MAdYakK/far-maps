@@ -61,6 +61,25 @@ const farMapsMintAbi = [
     inputs: [{ name: "owner", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
   },
+
+  // ✅ For "already minted" NFT image sharing (ERC-721 Enumerable + tokenURI)
+  {
+    type: "function",
+    name: "tokenOfOwnerByIndex",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "index", type: "uint256" },
+    ],
+    outputs: [{ name: "tokenId", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "tokenURI",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ name: "uri", type: "string" }],
+  },
 ] as const;
 
 type Mode = "followers" | "following" | "both";
@@ -104,6 +123,15 @@ function normalizeAddr(v: any): `0x${string}` | null {
 
   const trimmed = String(s).trim();
   return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? (trimmed as `0x${string}`) : null;
+}
+
+async function safeJson(res: Response) {
+  const t = await res.text();
+  try {
+    return t ? JSON.parse(t) : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function ShareMapPage() {
@@ -210,15 +238,67 @@ export default function ShareMapPage() {
     return `${baseUrl}${imageSrc.startsWith("/") ? "" : "/"}${imageSrc}`;
   }, [fid, imageSrc]);
 
+  async function getWalletAccountAndClients() {
+    const ethProvider = await sdk.wallet.getEthereumProvider();
+    const walletClient = createWalletClient({
+      chain: base,
+      transport: custom(ethProvider as any),
+    });
+
+    const rpc = process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
+    const publicClient = createPublicClient({
+      chain: base,
+      transport: http(rpc),
+    });
+
+    let account: `0x${string}` | null = null;
+
+    try {
+      const addrs = await walletClient.getAddresses();
+      account = normalizeAddr(addrs);
+    } catch {}
+
+    if (!account) {
+      try {
+        const accts = await (ethProvider as any).request?.({ method: "eth_accounts", params: [] });
+        account = normalizeAddr(accts);
+      } catch {}
+    }
+
+    if (!account) {
+      try {
+        const requested = await (ethProvider as any).request?.({
+          method: "eth_requestAccounts",
+          params: [],
+        });
+        account = normalizeAddr(requested);
+      } catch {}
+    }
+
+    if (!account) throw new Error("No wallet address returned from provider.");
+    if (!isAddress(account)) throw new Error(`Invalid wallet address from provider: ${String(account)}`);
+
+    return { account, ethProvider, walletClient, publicClient };
+  }
+
+  async function composeShare(text: string, image: string) {
+    // extra safety: make sure miniapp SDK is ready at share time
+    try {
+      await sdk.actions.ready();
+    } catch {}
+
+    await sdk.actions.composeCast({
+      text,
+      embeds: [image, MINIAPP_LINK],
+    });
+  }
+
   async function shareMintedCast() {
     if (!mintedImageUrl) return;
 
     try {
       setSharingMinted(true);
-      await sdk.actions.composeCast({
-        text: "I got my FarMap! Check out yours!",
-        embeds: [mintedImageUrl, MINIAPP_LINK],
-      });
+      await composeShare("I got my FarMap! Check out yours!", mintedImageUrl);
       setSharePopupOpen(false);
     } catch (e: any) {
       setMintErr(e?.message || "Failed to share");
@@ -227,16 +307,59 @@ export default function ShareMapPage() {
     }
   }
 
-  // Used only for the "Already minted" overlay (shares the current map image)
-  async function shareCurrentMapCast() {
-    if (!imageAbsolute) return;
-
+  // ✅ NEW: for Already Minted overlay, try to share NFT image
+  async function shareAlreadyMintedCast() {
     try {
       setSharingMinted(true);
-      await sdk.actions.composeCast({
-        text: "I got my FarMap! Check out yours!",
-        embeds: [imageAbsolute, MINIAPP_LINK],
-      });
+      setMintErr("");
+
+      const { account, publicClient } = await getWalletAccountAndClients();
+
+      // First try: read latest owned token + tokenURI (requires ERC721Enumerable)
+      let shareImage = "";
+      try {
+        const bal = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: farMapsMintAbi,
+          functionName: "balanceOf",
+          args: [account],
+        });
+
+        if (bal > BigInt(0)) {
+          const lastIndex = bal - BigInt(1);
+
+          const tokenId = await publicClient.readContract({
+            address: CONTRACT_ADDRESS,
+            abi: farMapsMintAbi,
+            functionName: "tokenOfOwnerByIndex",
+            args: [account, lastIndex],
+          });
+
+          const tokenUri = await publicClient.readContract({
+            address: CONTRACT_ADDRESS,
+            abi: farMapsMintAbi,
+            functionName: "tokenURI",
+            args: [tokenId],
+          });
+
+          // fetch metadata JSON
+          const metaRes = await fetch(String(tokenUri), { cache: "no-store" });
+          const meta = await safeJson(metaRes);
+
+          const img = typeof meta?.image === "string" ? meta.image.trim() : "";
+          if (img) shareImage = img;
+        }
+      } catch {
+        // ignore and fallback
+      }
+
+      // fallback: share current map image
+      if (!shareImage) {
+        if (!imageAbsolute) throw new Error("Missing map image url to share.");
+        shareImage = imageAbsolute;
+      }
+
+      await composeShare("I got my FarMap! Check out yours!", shareImage);
       setAlreadyMintedOpen(false);
     } catch (e: any) {
       setMintErr(e?.message || "Failed to share");
@@ -259,50 +382,7 @@ export default function ShareMapPage() {
       setMinting(true);
       setMintStage("Connecting wallet…");
 
-      const ethProvider = await sdk.wallet.getEthereumProvider();
-
-      const walletClient = createWalletClient({
-        chain: base,
-        transport: custom(ethProvider as any),
-      });
-
-      const rpc = process.env.NEXT_PUBLIC_BASE_RPC_URL?.trim() || "https://mainnet.base.org";
-      const publicClient = createPublicClient({
-        chain: base,
-        transport: http(rpc),
-      });
-
-      // Get account robustly
-      let account: `0x${string}` | null = null;
-
-      try {
-        const addrs = await walletClient.getAddresses();
-        account = normalizeAddr(addrs);
-      } catch {}
-
-      if (!account) {
-        try {
-          const accts = await (ethProvider as any).request?.({ method: "eth_accounts", params: [] });
-          account = normalizeAddr(accts);
-        } catch {}
-      }
-
-      if (!account) {
-        try {
-          const requested = await (ethProvider as any).request?.({
-            method: "eth_requestAccounts",
-            params: [],
-          });
-          account = normalizeAddr(requested);
-        } catch {}
-      }
-
-      if (!account) {
-        throw new Error("No wallet address returned from provider (eth_accounts / eth_requestAccounts).");
-      }
-      if (!isAddress(account)) {
-        throw new Error(`Invalid wallet address from provider: ${String(account)}`);
-      }
+      const { account, walletClient, publicClient } = await getWalletAccountAndClients();
 
       // 1 mint per wallet for everyone except DEV (only if DEV_MODE is true)
       const isDev = DEV_MODE && account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
@@ -333,8 +413,7 @@ export default function ShareMapPage() {
         body: JSON.stringify({ fid, username }),
       });
 
-      const prepText = await prepRes.text();
-      const prepJson = prepText ? (JSON.parse(prepText) as PrepareResp) : null;
+      const prepJson = await safeJson(prepRes);
       if (!prepRes.ok || !prepJson?.ok) {
         throw new Error(prepJson ? JSON.stringify(prepJson) : "Prepare failed");
       }
@@ -384,15 +463,10 @@ export default function ShareMapPage() {
         }),
       });
 
-      const vText = await vRes.text();
-      let vJson: any = null;
-      try {
-        vJson = vText ? JSON.parse(vText) : null;
-      } catch {}
+      const vJson = await safeJson(vRes);
 
       if (!vRes.ok || !vJson?.ok) {
-        const detail = vText ? vText.slice(0, 1200) : `HTTP ${vRes.status}`;
-        throw new Error(`Voucher failed: ${detail}`);
+        throw new Error(`Voucher failed: ${JSON.stringify(vJson ?? { status: vRes.status })}`);
       }
 
       // Sanity: voucher.to must equal our wallet
@@ -453,7 +527,6 @@ export default function ShareMapPage() {
       setMintTxHash(hash as unknown as string);
       setMintStage(`Minted! Tx ${shortAddr(hash as any)}`);
 
-      // open share popup instead of auto-sharing
       setSharePopupOpen(true);
     } catch (e: any) {
       setMintErr(e?.message || "Mint failed");
@@ -579,14 +652,14 @@ export default function ShareMapPage() {
               {/* Loading overlay */}
               {loadingImg && <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />}
 
-              {/* ✅ Already minted overlay (click/tap anywhere on it to share) */}
+              {/* ✅ Already minted overlay — NOW TAPPABLE */}
               {alreadyMintedOpen && (
                 <OverlayCard
                   title="ALREADY MINTED!"
                   subtitle="Tap to share your FarMap!"
                   onClose={() => setAlreadyMintedOpen(false)}
                   onClick={() => {
-                    void shareCurrentMapCast();
+                    void shareAlreadyMintedCast();
                   }}
                 />
               )}
@@ -740,6 +813,7 @@ function CenterBubblePopup({
   );
 }
 
+// ✅ FIXED OverlayCard: if clickable, the card itself is clickable (no stopPropagation blocking)
 function OverlayCard({
   title,
   subtitle,
@@ -751,6 +825,8 @@ function OverlayCard({
   onClick?: (() => void) | undefined;
   onClose?: (() => void) | undefined;
 }) {
+  const clickable = !!onClick;
+
   return (
     <div
       style={{
@@ -761,7 +837,7 @@ function OverlayCard({
         display: "grid",
         placeItems: "center",
         padding: 14,
-        cursor: onClick ? "pointer" : "default",
+        cursor: clickable ? "pointer" : "default",
       }}
       onClick={() => {
         if (onClick) onClick();
@@ -776,8 +852,13 @@ function OverlayCard({
           padding: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
           position: "relative",
+          cursor: clickable ? "pointer" : "default",
         }}
-        onClick={(e) => e.stopPropagation()}
+        // ✅ Only stop propagation when NOT clickable (so clicks don't close accidentally)
+        onClick={(e) => {
+          if (!clickable) e.stopPropagation();
+          // If clickable, let the outer handler run (so the whole card works)
+        }}
       >
         {onClose ? (
           <button
@@ -815,7 +896,7 @@ function OverlayCard({
               border: "3px solid rgba(255,255,255,0.25)",
               borderTopColor: "white",
               animation: "spin 0.9s linear infinite",
-              opacity: onClick ? 0.0 : 1,
+              opacity: clickable ? 0.0 : 1,
             }}
           />
           <div style={{ fontWeight: 800 }}>{title}</div>
