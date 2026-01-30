@@ -9,15 +9,17 @@ import { base } from "viem/chains";
 import { erc20Abi } from "viem";
 
 // ─────────────────────────────────────────────
-// CONFIG
+// CONFIG — set these to your deployed values
 // ─────────────────────────────────────────────
 const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
+
+// Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
 // ─────────────────────────────────────────────
-// DEV MODE
+// DEV MODE (toggle on/off)
 // ─────────────────────────────────────────────
-const DEV_MODE = true; // ✅ set true ONLY while debugging
+const DEV_MODE = false; // ✅ set true ONLY while debugging
 const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as const;
 
 // Miniapp link to include in shares
@@ -59,6 +61,8 @@ const farMapsMintAbi = [
     inputs: [{ name: "owner", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
   },
+
+  // ✅ For "already minted" NFT image sharing (ERC-721 Enumerable + tokenURI)
   {
     type: "function",
     name: "tokenOfOwnerByIndex",
@@ -128,72 +132,6 @@ async function safeJson(res: Response) {
   } catch {
     return null;
   }
-}
-
-/**
- * ✅ IRYS-ONLY URL enforcement (revert to the old behavior)
- * - NEVER share arweave.net or ar-io
- * - NEVER share uploader.irys.xyz
- * - Always share gateway.irys.xyz (or node1/node2 optionally)
- */
-function enforceIrysGatewayUrl(input: string) {
-  if (!input) return input;
-
-  // If it's already a gateway/node link, normalize uploader->gateway and return.
-  if (input.includes("uploader.irys.xyz/")) {
-    return input.replace("https://uploader.irys.xyz/", "https://gateway.irys.xyz/").replace("http://uploader.irys.xyz/", "https://gateway.irys.xyz/");
-  }
-
-  // Try to extract the txid-ish last path segment from any known URL
-  try {
-    const u = new URL(input.replace(/^http:\/\//i, "https://"));
-    const parts = u.pathname.split("/").filter(Boolean);
-
-    // arweave can be /tx/<id> or /<id>
-    let id = "";
-    if (parts.length === 1) id = parts[0];
-    if (parts.length === 2 && parts[0] === "tx") id = parts[1];
-
-    // irys gateway/node is /<id>
-    if (!id && parts.length >= 1) id = parts[parts.length - 1];
-
-    if (id) return `https://gateway.irys.xyz/${id}`;
-  } catch {
-    // If it's not a URL, fall through
-  }
-
-  // If someone passed a bare id, allow it (best effort)
-  if (/^[a-zA-Z0-9_-]{32,}$/.test(input.trim())) {
-    return `https://gateway.irys.xyz/${input.trim()}`;
-  }
-
-  return input.replace(/^http:\/\//i, "https://");
-}
-
-/** Optional: warm up ONLY Irys gateways (no arweave fallbacks) */
-async function warmIrys(idOrUrl: string) {
-  const url = enforceIrysGatewayUrl(idOrUrl);
-  let id = "";
-  try {
-    const u = new URL(url);
-    id = u.pathname.split("/").filter(Boolean)[0] || "";
-  } catch {}
-
-  const urls = id
-    ? [
-        `https://gateway.irys.xyz/${id}`,
-        `https://node1.irys.xyz/${id}`,
-        `https://node2.irys.xyz/${id}`,
-      ]
-    : [url];
-
-  for (const u of urls) {
-    try {
-      const res = await fetch(u, { method: "GET", cache: "no-store" });
-      if (res.ok) return u;
-    } catch {}
-  }
-  return url;
 }
 
 export default function ShareMapPage() {
@@ -344,19 +282,14 @@ export default function ShareMapPage() {
   }
 
   async function composeShare(text: string, image: string) {
+    // extra safety: make sure miniapp SDK is ready at share time
     try {
       await sdk.actions.ready();
     } catch {}
 
-    // ✅ FORCE IRYS LINKS ONLY
-    const shareImg = enforceIrysGatewayUrl(image);
-
-    // Optional warm-up (still IRYS only)
-    await warmIrys(shareImg).catch(() => {});
-
     await sdk.actions.composeCast({
       text,
-      embeds: [shareImg, MINIAPP_LINK],
+      embeds: [image, MINIAPP_LINK],
     });
   }
 
@@ -374,7 +307,7 @@ export default function ShareMapPage() {
     }
   }
 
-  // ✅ For Already Minted overlay, share NFT image if possible; else share current map image
+  // ✅ NEW: for Already Minted overlay, try to share NFT image
   async function shareAlreadyMintedCast() {
     try {
       setSharingMinted(true);
@@ -382,9 +315,8 @@ export default function ShareMapPage() {
 
       const { account, publicClient } = await getWalletAccountAndClients();
 
+      // First try: read latest owned token + tokenURI (requires ERC721Enumerable)
       let shareImage = "";
-
-      // Try to fetch latest minted token's metadata.image (but enforce IRYS gateway)
       try {
         const bal = await publicClient.readContract({
           address: CONTRACT_ADDRESS,
@@ -403,37 +335,27 @@ export default function ShareMapPage() {
             args: [account, lastIndex],
           });
 
-          const tokenUriRaw = await publicClient.readContract({
+          const tokenUri = await publicClient.readContract({
             address: CONTRACT_ADDRESS,
             abi: farMapsMintAbi,
             functionName: "tokenURI",
             args: [tokenId],
           });
 
-          const tokenUri = enforceIrysGatewayUrl(String(tokenUriRaw));
-          // Warm tokenURI (IRYS only)
-          await warmIrys(tokenUri).catch(() => {});
-
-          const metaRes = await fetch(tokenUri, { cache: "no-store" });
+          // fetch metadata JSON
+          const metaRes = await fetch(String(tokenUri), { cache: "no-store" });
           const meta = await safeJson(metaRes);
 
-          const imgRaw =
-            typeof meta?.image === "string"
-              ? meta.image.trim()
-              : typeof meta?.image_url === "string"
-              ? meta.image_url.trim()
-              : "";
-
-          const img = enforceIrysGatewayUrl(imgRaw);
+          const img = typeof meta?.image === "string" ? meta.image.trim() : "";
           if (img) shareImage = img;
         }
       } catch {
         // ignore and fallback
       }
 
+      // fallback: share current map image
       if (!shareImage) {
         if (!imageAbsolute) throw new Error("Missing map image url to share.");
-        // This is your own domain, NOT arweave; leave it as-is
         shareImage = imageAbsolute;
       }
 
@@ -462,7 +384,9 @@ export default function ShareMapPage() {
 
       const { account, walletClient, publicClient } = await getWalletAccountAndClients();
 
+      // 1 mint per wallet for everyone except DEV (only if DEV_MODE is true)
       const isDev = DEV_MODE && account.toLowerCase() === DEV_MULTI_MINT_ADDRESS.toLowerCase();
+
       setMintStage(isDev ? "Dev mode: skipping 1-per-wallet check…" : "Checking mint status…");
 
       if (!isDev) {
@@ -489,23 +413,13 @@ export default function ShareMapPage() {
         body: JSON.stringify({ fid, username }),
       });
 
-      const prepJson = (await safeJson(prepRes)) as PrepareResp | any;
+      const prepJson = await safeJson(prepRes);
       if (!prepRes.ok || !prepJson?.ok) {
         throw new Error(prepJson ? JSON.stringify(prepJson) : "Prepare failed");
       }
 
-      // ✅ Force IRYS gateway links
-      const tokenUriClient = enforceIrysGatewayUrl(String(prepJson.tokenUri || ""));
-      const imgUrlClient = enforceIrysGatewayUrl(String(prepJson.imageUrl || ""));
-
-      if (!tokenUriClient || !imgUrlClient) throw new Error("Prepare did not return tokenUri/imageUrl");
-
-      setMintedTokenUri(tokenUriClient);
-      setMintedImageUrl(imgUrlClient);
-
-      // Warm both (IRYS only)
-      await warmIrys(imgUrlClient).catch(() => {});
-      await warmIrys(tokenUriClient).catch(() => {});
+      const tokenUri = prepJson.tokenUri;
+      const imgUrl = prepJson.imageUrl;
 
       // Voucher auth (user signature)
       setMintStage("Authorizing mint…");
@@ -515,7 +429,7 @@ export default function ShareMapPage() {
       const message =
         `FarMaps mint authorization\n` +
         `mintAttemptId: ${mintAttemptId}\n` +
-        `tokenUri: ${tokenUriClient}\n` +
+        `tokenUri: ${tokenUri}\n` +
         `timestamp: ${Date.now()}`;
 
       let userSig: `0x${string}` | null = null;
@@ -543,7 +457,7 @@ export default function ShareMapPage() {
         body: JSON.stringify({
           mintAttemptId,
           to: String(account).trim(),
-          tokenUri: tokenUriClient, // ✅ IRYS gateway
+          tokenUri,
           message,
           signature: userSig,
         }),
@@ -555,14 +469,12 @@ export default function ShareMapPage() {
         throw new Error(`Voucher failed: ${JSON.stringify(vJson ?? { status: vRes.status })}`);
       }
 
+      // Sanity: voucher.to must equal our wallet
       if (String(vJson?.voucher?.to || "").toLowerCase() !== account.toLowerCase()) {
         throw new Error(`Voucher mismatch: voucher.to=${vJson?.voucher?.to} but wallet=${account}`);
       }
 
-      const voucherTokenUri = enforceIrysGatewayUrl(String(vJson?.voucher?.tokenURI || vJson?.voucher?.tokenUri || ""));
-      if (!voucherTokenUri) throw new Error("Voucher missing tokenURI");
-
-      // Approve USDC
+      // Approve USDC (if needed)
       setMintStage("Approving USDC…");
       const onchainPrice = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
@@ -598,7 +510,7 @@ export default function ShareMapPage() {
         args: [
           {
             to: vJson.voucher.to,
-            tokenURI: voucherTokenUri, // ✅ IRYS gateway written onchain
+            tokenURI: vJson.voucher.tokenURI,
             price: BigInt(vJson.voucher.price),
             nonce: BigInt(vJson.voucher.nonce),
             deadline: BigInt(vJson.voucher.deadline),
@@ -610,10 +522,11 @@ export default function ShareMapPage() {
 
       await publicClient.waitForTransactionReceipt({ hash });
 
+      setMintedTokenUri(tokenUri);
+      setMintedImageUrl(imgUrl);
       setMintTxHash(hash as unknown as string);
       setMintStage(`Minted! Tx ${shortAddr(hash as any)}`);
 
-      // Share popup after mint
       setSharePopupOpen(true);
     } catch (e: any) {
       setMintErr(e?.message || "Mint failed");
@@ -736,8 +649,10 @@ export default function ShareMapPage() {
                 }}
               />
 
+              {/* Loading overlay */}
               {loadingImg && <OverlayCard title="Loading Farmap" subtitle="Loading map image…" />}
 
+              {/* ✅ Already minted overlay — NOW TAPPABLE */}
               {alreadyMintedOpen && (
                 <OverlayCard
                   title="ALREADY MINTED!"
@@ -749,6 +664,7 @@ export default function ShareMapPage() {
                 />
               )}
 
+              {/* Share popup after mint */}
               {sharePopupOpen && mintedImageUrl ? (
                 <CenterBubblePopup
                   title="Mint complete!"
@@ -759,6 +675,7 @@ export default function ShareMapPage() {
                 />
               ) : null}
 
+              {/* Error overlay */}
               {imgOk === false ? (
                 <div
                   style={{
@@ -896,6 +813,7 @@ function CenterBubblePopup({
   );
 }
 
+// ✅ FIXED OverlayCard: if clickable, the card itself is clickable (no stopPropagation blocking)
 function OverlayCard({
   title,
   subtitle,
@@ -936,8 +854,10 @@ function OverlayCard({
           position: "relative",
           cursor: clickable ? "pointer" : "default",
         }}
+        // ✅ Only stop propagation when NOT clickable (so clicks don't close accidentally)
         onClick={(e) => {
           if (!clickable) e.stopPropagation();
+          // If clickable, let the outer handler run (so the whole card works)
         }}
       >
         {onClose ? (
