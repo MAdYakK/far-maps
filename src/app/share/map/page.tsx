@@ -59,8 +59,6 @@ const farMapsMintAbi = [
     inputs: [{ name: "owner", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
   },
-
-  // ✅ For "already minted" sharing (ERC-721 Enumerable + tokenURI)
   {
     type: "function",
     name: "tokenOfOwnerByIndex",
@@ -132,96 +130,70 @@ async function safeJson(res: Response) {
   }
 }
 
-/** Stronger normalization than forceGatewayUrl() */
-function normalizeIrysUrl(input: string) {
+/**
+ * ✅ IRYS-ONLY URL enforcement (revert to the old behavior)
+ * - NEVER share arweave.net or ar-io
+ * - NEVER share uploader.irys.xyz
+ * - Always share gateway.irys.xyz (or node1/node2 optionally)
+ */
+function enforceIrysGatewayUrl(input: string) {
   if (!input) return input;
-  let s = String(input).trim();
 
-  // Force https
-  s = s.replace(/^http:\/\//i, "https://");
+  // If it's already a gateway/node link, normalize uploader->gateway and return.
+  if (input.includes("uploader.irys.xyz/")) {
+    return input.replace("https://uploader.irys.xyz/", "https://gateway.irys.xyz/").replace("http://uploader.irys.xyz/", "https://gateway.irys.xyz/");
+  }
 
-  // uploader -> gateway
-  s = s.replace("https://uploader.irys.xyz/", "https://gateway.irys.xyz/");
-  s = s.replace("http://uploader.irys.xyz/", "https://gateway.irys.xyz/");
+  // Try to extract the txid-ish last path segment from any known URL
+  try {
+    const u = new URL(input.replace(/^http:\/\//i, "https://"));
+    const parts = u.pathname.split("/").filter(Boolean);
 
-  // arweave /tx/ -> /
-  s = s.replace("https://arweave.net/tx/", "https://arweave.net/");
-  s = s.replace("http://arweave.net/tx/", "https://arweave.net/");
+    // arweave can be /tx/<id> or /<id>
+    let id = "";
+    if (parts.length === 1) id = parts[0];
+    if (parts.length === 2 && parts[0] === "tx") id = parts[1];
 
-  // ar-io.dev -> ar-io.net (if it ever shows up)
-  s = s.replace("https://ar-io.dev/", "https://ar-io.net/");
-  s = s.replace("http://ar-io.dev/", "https://ar-io.net/");
+    // irys gateway/node is /<id>
+    if (!id && parts.length >= 1) id = parts[parts.length - 1];
 
-  return s;
+    if (id) return `https://gateway.irys.xyz/${id}`;
+  } catch {
+    // If it's not a URL, fall through
+  }
+
+  // If someone passed a bare id, allow it (best effort)
+  if (/^[a-zA-Z0-9_-]{32,}$/.test(input.trim())) {
+    return `https://gateway.irys.xyz/${input.trim()}`;
+  }
+
+  return input.replace(/^http:\/\//i, "https://");
 }
 
-function extractTxId(url: string) {
+/** Optional: warm up ONLY Irys gateways (no arweave fallbacks) */
+async function warmIrys(idOrUrl: string) {
+  const url = enforceIrysGatewayUrl(idOrUrl);
+  let id = "";
   try {
     const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean);
-    if (parts.length === 1) return parts[0];
-    if (parts.length === 2 && parts[0] === "tx") return parts[1];
+    id = u.pathname.split("/").filter(Boolean)[0] || "";
   } catch {}
-  return "";
-}
 
-function gatewayCandidatesFromUrl(url: string) {
-  const normalized = normalizeIrysUrl(url);
-  const id = extractTxId(normalized);
+  const urls = id
+    ? [
+        `https://gateway.irys.xyz/${id}`,
+        `https://node1.irys.xyz/${id}`,
+        `https://node2.irys.xyz/${id}`,
+      ]
+    : [url];
 
-  if (!id) return [normalized];
-
-  return [
-    `https://gateway.irys.xyz/${id}`,
-    `https://node1.irys.xyz/${id}`,
-    `https://node2.irys.xyz/${id}`,
-    `https://ar-io.net/${id}`,
-    `https://arweave.net/${id}`,
-  ];
-}
-
-async function fetchFirstOk(urls: string[], timeoutMs = 3500) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    for (const u of urls) {
-      try {
-        const res = await fetch(u, { cache: "no-store", signal: controller.signal as any });
-        if (res.ok) return { ok: true as const, url: u, res };
-      } catch {
-        // try next
-      }
-    }
-    return { ok: false as const, url: "", res: null as any };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-/** Fetch JSON with gateway fallbacks */
-async function fetchJsonWithFallback(url: string) {
-  const urls = gatewayCandidatesFromUrl(url);
   for (const u of urls) {
     try {
-      const res = await fetch(u, { cache: "no-store" });
-      if (!res.ok) continue;
-      const txt = await res.text();
-      if (!txt || !txt.trim()) continue;
-      return { ok: true as const, url: u, json: JSON.parse(txt) };
-    } catch {
-      // next
-    }
+      const res = await fetch(u, { method: "GET", cache: "no-store" });
+      if (res.ok) return u;
+    } catch {}
   }
-  return { ok: false as const, url: "", json: null as any };
-}
-
-/** Ensure the image URL Warpcast uses is fetchable now */
-async function pickShareableImageUrl(imageUrl: string) {
-  const candidates = gatewayCandidatesFromUrl(imageUrl);
-  const r = await fetchFirstOk(candidates, 3500);
-  if (r.ok) return r.url;
-  // fallback: just return normalized original
-  return normalizeIrysUrl(imageUrl);
+  return url;
 }
 
 export default function ShareMapPage() {
@@ -376,8 +348,11 @@ export default function ShareMapPage() {
       await sdk.actions.ready();
     } catch {}
 
-    // ✅ pick a URL that is fetchable now
-    const shareImg = await pickShareableImageUrl(image);
+    // ✅ FORCE IRYS LINKS ONLY
+    const shareImg = enforceIrysGatewayUrl(image);
+
+    // Optional warm-up (still IRYS only)
+    await warmIrys(shareImg).catch(() => {});
 
     await sdk.actions.composeCast({
       text,
@@ -409,7 +384,7 @@ export default function ShareMapPage() {
 
       let shareImage = "";
 
-      // Try to fetch latest minted token's metadata.image with fallbacks
+      // Try to fetch latest minted token's metadata.image (but enforce IRYS gateway)
       try {
         const bal = await publicClient.readContract({
           address: CONTRACT_ADDRESS,
@@ -435,18 +410,21 @@ export default function ShareMapPage() {
             args: [tokenId],
           });
 
-          const tokenUri = normalizeIrysUrl(String(tokenUriRaw));
+          const tokenUri = enforceIrysGatewayUrl(String(tokenUriRaw));
+          // Warm tokenURI (IRYS only)
+          await warmIrys(tokenUri).catch(() => {});
 
-          const meta = await fetchJsonWithFallback(tokenUri);
+          const metaRes = await fetch(tokenUri, { cache: "no-store" });
+          const meta = await safeJson(metaRes);
 
           const imgRaw =
-            typeof meta?.json?.image === "string"
-              ? meta.json.image.trim()
-              : typeof meta?.json?.image_url === "string"
-              ? meta.json.image_url.trim()
+            typeof meta?.image === "string"
+              ? meta.image.trim()
+              : typeof meta?.image_url === "string"
+              ? meta.image_url.trim()
               : "";
 
-          const img = normalizeIrysUrl(imgRaw);
+          const img = enforceIrysGatewayUrl(imgRaw);
           if (img) shareImage = img;
         }
       } catch {
@@ -455,6 +433,7 @@ export default function ShareMapPage() {
 
       if (!shareImage) {
         if (!imageAbsolute) throw new Error("Missing map image url to share.");
+        // This is your own domain, NOT arweave; leave it as-is
         shareImage = imageAbsolute;
       }
 
@@ -515,14 +494,18 @@ export default function ShareMapPage() {
         throw new Error(prepJson ? JSON.stringify(prepJson) : "Prepare failed");
       }
 
-      const tokenUriClient = normalizeIrysUrl(String(prepJson.tokenUri || ""));
-      const imgUrlClient = normalizeIrysUrl(String(prepJson.imageUrl || ""));
+      // ✅ Force IRYS gateway links
+      const tokenUriClient = enforceIrysGatewayUrl(String(prepJson.tokenUri || ""));
+      const imgUrlClient = enforceIrysGatewayUrl(String(prepJson.imageUrl || ""));
 
       if (!tokenUriClient || !imgUrlClient) throw new Error("Prepare did not return tokenUri/imageUrl");
 
-      // store for UI/share immediately
       setMintedTokenUri(tokenUriClient);
       setMintedImageUrl(imgUrlClient);
+
+      // Warm both (IRYS only)
+      await warmIrys(imgUrlClient).catch(() => {});
+      await warmIrys(tokenUriClient).catch(() => {});
 
       // Voucher auth (user signature)
       setMintStage("Authorizing mint…");
@@ -560,7 +543,7 @@ export default function ShareMapPage() {
         body: JSON.stringify({
           mintAttemptId,
           to: String(account).trim(),
-          tokenUri: tokenUriClient,
+          tokenUri: tokenUriClient, // ✅ IRYS gateway
           message,
           signature: userSig,
         }),
@@ -576,7 +559,7 @@ export default function ShareMapPage() {
         throw new Error(`Voucher mismatch: voucher.to=${vJson?.voucher?.to} but wallet=${account}`);
       }
 
-      const voucherTokenUri = normalizeIrysUrl(String(vJson?.voucher?.tokenURI || vJson?.voucher?.tokenUri || ""));
+      const voucherTokenUri = enforceIrysGatewayUrl(String(vJson?.voucher?.tokenURI || vJson?.voucher?.tokenUri || ""));
       if (!voucherTokenUri) throw new Error("Voucher missing tokenURI");
 
       // Approve USDC
@@ -615,7 +598,7 @@ export default function ShareMapPage() {
         args: [
           {
             to: vJson.voucher.to,
-            tokenURI: voucherTokenUri,
+            tokenURI: voucherTokenUri, // ✅ IRYS gateway written onchain
             price: BigInt(vJson.voucher.price),
             nonce: BigInt(vJson.voucher.nonce),
             deadline: BigInt(vJson.voucher.deadline),
@@ -630,7 +613,7 @@ export default function ShareMapPage() {
       setMintTxHash(hash as unknown as string);
       setMintStage(`Minted! Tx ${shortAddr(hash as any)}`);
 
-      // Share immediately available
+      // Share popup after mint
       setSharePopupOpen(true);
     } catch (e: any) {
       setMintErr(e?.message || "Mint failed");
