@@ -19,7 +19,7 @@ const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 // ─────────────────────────────────────────────
 // DEV MODE (toggle on/off)
 // ─────────────────────────────────────────────
-const DEV_MODE = false; // ✅ set true ONLY while debugging
+const DEV_MODE = true; // ✅ set true ONLY while debugging
 const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as const;
 
 // Miniapp link to include in shares
