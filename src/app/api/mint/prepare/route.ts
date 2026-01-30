@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { Uploader } from "@irys/upload";
 import { BaseEth } from "@irys/upload-ethereum";
 
-const VERSION = "prepare-route-v4-fid-rarity-farcaster-trait";
+const VERSION = "prepare-route-v6-warmup-gateway-no-ar-io-dev";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -26,7 +26,7 @@ function gatewaysFor(id: string) {
     irysNode1: `https://node1.irys.xyz/${id}`,
     irysNode2: `https://node2.irys.xyz/${id}`,
     arweaveNet: `https://arweave.net/${id}`,
-    arIo: `https://ar-io.dev/${id}`,
+    arIo: `https://ar-io.net/${id}`, // ✅ FIXED (was ar-io.dev)
   };
 }
 
@@ -61,8 +61,10 @@ function normalizeFid(v: any): number | null {
 
 function normalizeUsername(v: any): string | undefined {
   if (typeof v !== "string") return undefined;
-  const s = v.trim();
-  return s ? s : undefined;
+  let s = v.trim();
+  if (!s) return undefined;
+  if (s.startsWith("@")) s = s.slice(1);
+  return s || undefined;
 }
 
 function getBaseUrl(req: Request) {
@@ -96,6 +98,70 @@ function fidRarity(fid: number): string {
   return "1m+";
 }
 
+// ✅ Optional server-side username backfill (only if NEYNAR_API_KEY is present)
+async function tryFetchUsernameFromFid(fid: number): Promise<string | undefined> {
+  const key = process.env.NEYNAR_API_KEY?.trim();
+  if (!key) return undefined;
+
+  try {
+    const r = await fetch(`https://api.neynar.com/v2/farcaster/user/bulk?fids=${fid}`, {
+      headers: { api_key: key },
+      cache: "no-store",
+    });
+
+    const j = await r.json().catch(() => null);
+    const u = j?.users?.[0]?.username;
+    return typeof u === "string" && u.trim() ? u.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchWithTimeout(url: string, ms = 3500) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try {
+    const res = await fetch(url, { method: "GET", signal: ac.signal, cache: "no-store" as any });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ✅ Warm up gateway propagation for immediate Warpcast/OpenSea fetch
+async function warmupPublicRead(id: string) {
+  const g = gatewaysFor(id);
+  const urls = [g.irysGateway, g.irysNode1, g.irysNode2, g.arIo, g.arweaveNet];
+
+  for (let i = 0; i < 5; i++) {
+    for (const u of urls) {
+      try {
+        const res = await fetchWithTimeout(u, 3500);
+        if (res.ok) {
+          // read a little to encourage caching
+          const ct = res.headers.get("content-type") || "";
+          if (ct.includes("application/json")) {
+            await res.text();
+          } else {
+            const reader = res.body?.getReader?.();
+            if (reader) {
+              await reader.read();
+              try {
+                reader.releaseLock();
+              } catch {}
+            }
+          }
+          return { ok: true, url: u };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400 + i * 250));
+  }
+  return { ok: false };
+}
+
 // Optional: simple GET to confirm deploy
 export async function GET(req: Request) {
   return json({
@@ -108,10 +174,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const reqId =
-    (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
+  const reqId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).toString();
 
-  // Use console.error so it reliably shows in Vercel logs
   console.error("[mint/prepare] HIT", {
     reqId,
     version: VERSION,
@@ -122,7 +186,6 @@ export async function POST(req: Request) {
     ua: (req.headers.get("user-agent") ?? "").slice(0, 120),
   });
 
-  // Read raw body once (more robust in embedded webviews)
   const raw = await req.text();
 
   let body: PrepareBody | null = null;
@@ -151,7 +214,7 @@ export async function POST(req: Request) {
 
   try {
     const fid = normalizeFid(body?.fid);
-    const username = normalizeUsername(body?.username);
+    const usernameFromBody = normalizeUsername(body?.username);
 
     if (!fid) {
       return json(
@@ -170,7 +233,7 @@ export async function POST(req: Request) {
 
     const rarity = fidRarity(fid);
 
-    // 1) Fetch PNG from existing generator
+    // ✅ Determine base URL
     const baseUrl = getBaseUrl(req);
     if (!baseUrl) {
       return json(
@@ -184,11 +247,13 @@ export async function POST(req: Request) {
       );
     }
 
-    const imageUrl = `${baseUrl}/api/map-image?fid=${encodeURIComponent(
+    // ✅ Instant image generator URL (always available to share)
+    const generatorUrl = `${baseUrl}/api/map-image?fid=${encodeURIComponent(
       String(fid)
     )}&mode=both&w=1000&h=1000&v=${Date.now()}`;
 
-    const imgRes = await fetch(imageUrl, { cache: "no-store" });
+    // 1) Fetch PNG from generator
+    const imgRes = await fetch(generatorUrl, { cache: "no-store" });
     if (!imgRes.ok) {
       const t = await imgRes.text().catch(() => "");
       return json(
@@ -199,7 +264,7 @@ export async function POST(req: Request) {
           error: "Failed to generate image",
           status: imgRes.status,
           detail: t.slice(0, 600),
-          imageUrl,
+          generatorUrl,
           baseUrl,
         },
         502
@@ -219,20 +284,26 @@ export async function POST(req: Request) {
     console.error("[irys] address:", addr);
     console.error("[irys] loaded balance:", loadedBal.toString());
 
+    // ✅ Username final (client-provided OR Neynar backfill)
+    const finalUsername = usernameFromBody ?? (await tryFetchUsernameFromFid(fid));
+
     // 3) Estimate cost
     const pngPrice = toBigInt(await irys.getPrice(pngBuffer.length));
 
-    // ✅ Use the same attribute schema we will upload for real (for accurate pricing)
     const metaEstimate = {
       name: `Far Map #${fid}`,
       description: "A map of your Farcaster network generated by Far Maps.",
       image: "https://gateway.irys.xyz/<txid>",
-      external_url: "https://far-maps.vercel.app",
+      image_url: "https://gateway.irys.xyz/<txid>",
+      external_url: MINIAPP_LINK,
       attributes: [
         { trait_type: "FID", value: fid },
         { trait_type: "FID Rarity", value: rarity },
-        ...(username ? [{ trait_type: "Farcaster", value: username }] : []),
+        ...(finalUsername ? [{ trait_type: "Farcaster", value: finalUsername }] : []),
       ],
+      properties: {
+        image_fallbacks: {},
+      },
     };
 
     const metaBytes = Buffer.byteLength(JSON.stringify(metaEstimate), "utf8");
@@ -260,54 +331,70 @@ export async function POST(req: Request) {
         { name: "Type", value: "Farmap" },
         { name: "FID", value: String(fid) },
         { name: "FID-Rarity", value: rarity },
-        ...(username ? [{ name: "Farcaster", value: username }] : []),
+        ...(finalUsername ? [{ name: "Farcaster", value: finalUsername }] : []),
       ],
     });
 
     const imgUrls = gatewaysFor(imgReceipt.id);
 
-    // 6) Upload metadata
+    // ✅ warm up image
+    await warmupPublicRead(imgReceipt.id);
+
+    // 6) Upload metadata (Buffer + fallbacks)
     const metadata = {
-      name: `Far Map #${fid}`,
+      name: finalUsername ? `Far Map — @${finalUsername}` : `Far Map #${fid}`,
       description: "A map of your Farcaster network generated by Far Maps.",
-      image: imgUrls.arweaveNet, // or arIo
-      external_url: "https://far-maps.vercel.app",
+      image: imgUrls.irysGateway,
+      image_url: imgUrls.irysGateway, // ✅ helps some indexers
+      external_url: MINIAPP_LINK, // ✅ miniapp link, not just your vercel site
       attributes: [
         { trait_type: "FID", value: fid },
         { trait_type: "FID Rarity", value: rarity },
-        ...(username ? [{ trait_type: "Farcaster", value: username }] : []),
+        ...(finalUsername ? [{ trait_type: "Farcaster", value: finalUsername }] : []),
       ],
+      properties: {
+        image_fallbacks: imgUrls, // ✅ redundancy without breaking OpenSea
+        fid,
+        username: finalUsername || undefined,
+      },
     };
 
-    const metaReceipt = await irys.upload(JSON.stringify(metadata), {
+    const metaReceipt = await irys.upload(Buffer.from(JSON.stringify(metadata)), {
       tags: [
         { name: "Content-Type", value: "application/json" },
         { name: "App-Name", value: "FarMaps" },
         { name: "Type", value: "Metadata" },
         { name: "FID", value: String(fid) },
         { name: "FID-Rarity", value: rarity },
-        ...(username ? [{ name: "Farcaster", value: username }] : []),
+        ...(finalUsername ? [{ name: "Farcaster", value: finalUsername }] : []),
       ],
     });
 
     const metaUrls = gatewaysFor(metaReceipt.id);
 
+    // ✅ warm up metadata
+    await warmupPublicRead(metaReceipt.id);
+
+    // ✅ Response should also use gateway (instant)
     return json({
       reqId,
       ok: true,
       version: VERSION,
       fid,
-      username,
+      username: finalUsername,
       fidRarity: rarity,
-      imageUrl: imgUrls.arweaveNet,   // or imgUrls.arIo
-      tokenUri: metaUrls.arweaveNet,  // or metaUrls.arIo
+
+      // ✅ instant + reliable URLs
+      imageUrl: imgUrls.irysGateway,
+      tokenUri: metaUrls.irysGateway,
+
       imgTx: imgReceipt.id,
       metaTx: metaReceipt.id,
       imageUrls: imgUrls,
       tokenUriUrls: metaUrls,
-      // helpful trace
+
       baseUrl,
-      generatorUrl: imageUrl,
+      generatorUrl,
     });
   } catch (e: any) {
     console.error("mint/prepare error:", e);
@@ -323,3 +410,6 @@ export async function POST(req: Request) {
     );
   }
 }
+
+// keep this at file scope
+const MINIAPP_LINK = "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps";
