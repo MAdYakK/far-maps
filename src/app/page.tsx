@@ -115,12 +115,13 @@ export default function HomePage() {
       );
 
       try {
-        const limitEach = 2000;
-        const maxEach = 5000;
-        const minScore = 0.8;
-        const concurrency = 4;
-        const hubPageSize = 50;
-        const hubDelayMs = 150;
+            const limitEach = 10000;
+            const maxEach = 20000;
+            const minScore = 0.8;
+            const concurrency = 2;
+            const hubPageSize = 50;
+            const hubDelayMs = 150;
+
 
         const url =
           `/api/network?fid=${fid}` +
