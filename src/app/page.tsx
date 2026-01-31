@@ -84,6 +84,8 @@ export default function HomePage() {
 
         if (detectedFid) {
           setFid(detectedFid);
+        } else {
+          if (DEBUG) setCtxStatus("No FID found in context.");
         }
       } catch (e: any) {
         if (DEBUG) setCtxStatus(e?.message || String(e));
@@ -115,13 +117,13 @@ export default function HomePage() {
       );
 
       try {
-            const limitEach = 10000;
-            const maxEach = 20000;
-            const minScore = 0.8;
-            const concurrency = 2;
-            const hubPageSize = 50;
-            const hubDelayMs = 150;
-
+        // Your current settings
+        const limitEach = 10000;
+        const maxEach = 20000;
+        const minScore = 0.8;
+        const concurrency = 2;
+        const hubPageSize = 50;
+        const hubDelayMs = 150;
 
         const url =
           `/api/network?fid=${fid}` +
@@ -134,10 +136,16 @@ export default function HomePage() {
           `&hubDelayMs=${hubDelayMs}`;
 
         const res = await fetch(url, { signal: controller.signal });
+
+        // Optional “step” update (feels nicer)
+        setLoadingStage("Hydrating profiles…");
+
         const text = await res.text();
         const json = text ? JSON.parse(text) : null;
 
         if (!res.ok || !json) throw new Error("Network error");
+
+        setLoadingStage("Building pins…");
 
         setPoints(json.points || []);
         setStats(json);
@@ -171,15 +179,14 @@ export default function HomePage() {
     return `/share/map?${qs}`;
   }, [fid, mode]);
 
-  // We’ll use a simple, readable minimize/maximize icon:
+  // Simple, readable minimize/maximize icon:
   // ▾ (collapse) / ▴ (expand)
   const MinIcon = overlayMin ? "▴" : "▾";
 
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
-      {/* ✅ Move Leaflet zoom controls slightly right from the edge (still on the left) */}
+      {/* ✅ Keep zoom controls on LEFT, but nudge them right a bit */}
       <style jsx global>{`
-        /* Keep zoom controls on LEFT, but nudge them right a bit */
         .leaflet-top.leaflet-left {
           left: 12px;
           top: 12px;
@@ -198,8 +205,7 @@ export default function HomePage() {
           position: "absolute",
           zIndex: 1000,
           top: 12,
-          // ✅ sits to the right of the zoom controls area
-          left: 56,
+          left: 56, // sits to the right of the zoom controls
           padding: overlayMin ? 8 : 10,
           borderRadius: overlayMin ? 999 : 12,
           background: "rgba(0,0,0,0.55)",
@@ -215,10 +221,9 @@ export default function HomePage() {
           if (overlayMin) setOverlayMin(false);
         }}
       >
-        {/* Left side: title */}
         <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ fontWeight: 800, lineHeight: 1 }}>{overlayMin ? "Far Maps" : "Far Maps"}</div>
+            <div style={{ fontWeight: 800, lineHeight: 1 }}>Far Maps</div>
 
             {/* Minimize / maximize button (always visible) */}
             <button
@@ -261,7 +266,6 @@ export default function HomePage() {
                   Both
                 </ToggleButton>
 
-                {/* ✅ SHARE BUTTON */}
                 <ToggleButton
                   active={false}
                   onClick={() => {
@@ -278,12 +282,41 @@ export default function HomePage() {
               </div>
 
               {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
+
+              {DEBUG ? (
+                <div style={{ marginTop: 10, fontSize: 11, opacity: 0.9 }}>
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>Debug</div>
+                  {ctxStatus ? <div style={{ marginBottom: 6 }}>ctxStatus: {ctxStatus}</div> : null}
+                  {stats ? (
+                    <div style={{ marginBottom: 6 }}>
+                      followers: {stats.followersCount} • following: {stats.followingCount} • pins:{" "}
+                      {stats.count}
+                    </div>
+                  ) : null}
+                  {ctxJson ? (
+                    <pre
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        maxHeight: 140,
+                        overflow: "auto",
+                        background: "rgba(255,255,255,0.08)",
+                        padding: 8,
+                        borderRadius: 10,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                      }}
+                    >
+                      {ctxJson}
+                    </pre>
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : null}
         </div>
       </div>
 
-      {/* Loading overlay */}
+      {/* ✅ Loading overlay with text + loading bar */}
       {loading && (
         <div
           style={{
@@ -294,9 +327,81 @@ export default function HomePage() {
             display: "grid",
             placeItems: "center",
             pointerEvents: "none",
+            padding: 16,
           }}
         >
-          <div style={{ color: "white", fontWeight: 700 }}>{loadingStage || "Loading…"}</div>
+          <div
+            style={{
+              width: "min(520px, 92vw)",
+              borderRadius: 16,
+              background: "rgba(0,0,0,0.55)",
+              border: "1px solid rgba(255,255,255,0.18)",
+              boxShadow: "0 18px 60px rgba(0,0,0,0.35)",
+              color: "white",
+              padding: 14,
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: 14 }}>{loadingStage || "Loading…"}</div>
+
+            <div style={{ marginTop: 10 }}>
+              {/* Indeterminate bar */}
+              <div
+                style={{
+                  position: "relative",
+                  height: 10,
+                  borderRadius: 999,
+                  overflow: "hidden",
+                  background: "rgba(255,255,255,0.14)",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    bottom: 0,
+                    width: "40%",
+                    borderRadius: 999,
+                    background: "rgba(255,255,255,0.70)",
+                    animation: "farmapsBar 1.05s ease-in-out infinite",
+                  }}
+                />
+              </div>
+
+              {/* Little spinner row */}
+              <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, opacity: 0.95 }}>
+                <div
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: 999,
+                    border: "2px solid rgba(255,255,255,0.25)",
+                    borderTopColor: "white",
+                    animation: "farmapsSpin 0.85s linear infinite",
+                  }}
+                />
+                <div style={{ fontSize: 12, opacity: 0.9 }}>Please wait…</div>
+              </div>
+            </div>
+
+            <style jsx global>{`
+              @keyframes farmapsBar {
+                0% {
+                  left: -40%;
+                }
+                50% {
+                  left: 30%;
+                }
+                100% {
+                  left: 100%;
+                }
+              }
+              @keyframes farmapsSpin {
+                to {
+                  transform: rotate(360deg);
+                }
+              }
+            `}</style>
+          </div>
         </div>
       )}
 
