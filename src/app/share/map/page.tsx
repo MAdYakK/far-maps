@@ -11,7 +11,7 @@ import { erc20Abi } from "viem";
 // ─────────────────────────────────────────────
 // CONFIG — set these to your deployed values
 // ─────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const;
+const CONTRACT_ADDRESS = "0x9962b8Fd5faF610A022111d81899358B1856a184" as const;
 
 // Base USDC (6 decimals)
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;

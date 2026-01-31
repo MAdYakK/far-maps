@@ -228,7 +228,7 @@ export async function POST(req: Request) {
     // ✅ IMPORTANT: make sure this matches the contract your frontend calls
     const contract =
       (process.env.FARMAPS_CONTRACT as `0x${string}` | undefined) ??
-      ("0x13096b5cc02913579b2be3FE9B69a2FEfa87820c" as const);
+      ("0x9962b8Fd5faF610A022111d81899358B1856a184" as const);
 
     const rpcUrl = mustEnv("BASE_RPC_URL");
     const pk = mustEnv("VOUCHER_SIGNER_PRIVATE_KEY");
