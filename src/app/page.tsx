@@ -27,8 +27,8 @@ type NetworkResponse = {
   count: number;
   points: PinPoint[];
   cache?: {
-    network?: { hit?: boolean };
-    users?: { requested?: number; cacheHits?: number; fetchedCount?: number };
+    network?: { hitL1?: boolean; hitRedis?: boolean };
+    users?: { requested?: number; cacheHitsL1?: number; cacheHitsRedis?: number; fetchedCount?: number };
   };
 };
 
@@ -48,6 +48,14 @@ const LeafletMap = dynamic(
   points: PinPoint[];
 }>;
 
+// Tiered expansion steps (safe ramp)
+const MAX_EACH_STEPS = [5_000, 10_000, 20_000, 50_000] as const;
+
+function nextStep(curr: number) {
+  for (const s of MAX_EACH_STEPS) if (s > curr) return s;
+  return curr;
+}
+
 export default function HomePage() {
   const [fid, setFid] = useState<number | null>(null);
   const [points, setPoints] = useState<PinPoint[]>([]);
@@ -61,10 +69,23 @@ export default function HomePage() {
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
-  // ✅ overlay minimize state
-  const [overlayMin, setOverlayMin] = useState(false);
-
   const abortRef = useRef<AbortController | null>(null);
+
+  // ─────────────────────────────────────────────
+  // Progressive loading state
+  // ─────────────────────────────────────────────
+  const [maxEach, setMaxEach] = useState<number>(MAX_EACH_STEPS[0]);
+  const [autoLoad, setAutoLoad] = useState(false);
+  const autoRef = useRef(false);
+  autoRef.current = autoLoad;
+
+  // Tune these to “not hammer Neynar”
+  // (Your /api/network route already retries/backoffs; these just reduce burst.)
+  const limitEach = 2000; // can be higher, but 2k is a good balance
+  const minScore = 0.8;
+  const concurrency = 2; // <-- key: reduce Neynar parallelism for huge loads
+  const hubPageSize = 50;
+  const hubDelayMs = 200;
 
   // ─────────────────────────────────────────────
   // Get Farcaster context + FID
@@ -82,9 +103,7 @@ export default function HomePage() {
           ((ctx as any)?.viewer?.fid as number | undefined) ??
           ((ctx as any)?.user?.fid as number | undefined);
 
-        if (detectedFid) {
-          setFid(detectedFid);
-        }
+        if (detectedFid) setFid(detectedFid);
       } catch (e: any) {
         if (DEBUG) setCtxStatus(e?.message || String(e));
       }
@@ -92,7 +111,7 @@ export default function HomePage() {
   }, []);
 
   // ─────────────────────────────────────────────
-  // Fetch network data
+  // Fetch network data (tiered maxEach)
   // ─────────────────────────────────────────────
   useEffect(() => {
     if (!fid) return;
@@ -108,20 +127,13 @@ export default function HomePage() {
 
       setLoadingStage(
         mode === "followers"
-          ? "Fetching followers…"
+          ? `Fetching followers (up to ${maxEach.toLocaleString()})…`
           : mode === "following"
-          ? "Fetching following…"
-          : "Fetching followers + following…"
+          ? `Fetching following (up to ${maxEach.toLocaleString()})…`
+          : `Fetching followers + following (up to ${maxEach.toLocaleString()})…`
       );
 
       try {
-        const limitEach = 2000;
-        const maxEach = 5000;
-        const minScore = 0.8;
-        const concurrency = 4;
-        const hubPageSize = 50;
-        const hubDelayMs = 150;
-
         const url =
           `/api/network?fid=${fid}` +
           `&mode=${mode}` +
@@ -136,12 +148,35 @@ export default function HomePage() {
         const text = await res.text();
         const json = text ? JSON.parse(text) : null;
 
-        if (!res.ok || !json) throw new Error("Network error");
+        if (!res.ok || !json) throw new Error(json?.error || "Network error");
 
         setPoints(json.points || []);
         setStats(json);
+
+        // If auto-load is on and we likely hit the cap, step up after a short delay
+        // (We assume “capped” when returned count == maxEach for the chosen mode.)
+        if (autoRef.current) {
+          const followerCapHit = (json.followersCount ?? 0) >= maxEach && (mode === "followers" || mode === "both");
+          const followingCapHit = (json.followingCount ?? 0) >= maxEach && (mode === "following" || mode === "both");
+
+          const capHit = followerCapHit || followingCapHit;
+
+          const next = nextStep(maxEach);
+          if (capHit && next > maxEach) {
+            // small delay to spread Neynar/hub load
+            await new Promise((r) => setTimeout(r, 900));
+            // only continue if still auto-loading
+            if (autoRef.current) setMaxEach(next);
+          } else {
+            // stop auto if no longer capped or no next step
+            if (autoRef.current) setAutoLoad(false);
+          }
+        }
       } catch (e: any) {
-        if (e?.name !== "AbortError") setError(e?.message || "Error");
+        if (e?.name !== "AbortError") {
+          setError(e?.message || "Error");
+          setAutoLoad(false);
+        }
       } finally {
         setLoading(false);
         setLoadingStage("");
@@ -149,137 +184,132 @@ export default function HomePage() {
     })();
 
     return () => controller.abort();
-  }, [fid, mode]);
+  }, [fid, mode, maxEach]);
 
   const center = useMemo<LatLngExpression>(() => {
     if (points.length) return [points[0].lat, points[0].lng];
     return [20, 0];
   }, [points]);
 
-  const shareUrl = useMemo(() => {
-    if (!fid) return "";
-    const qs =
-      `fid=${fid}` +
-      `&mode=${mode}` +
-      `&minScore=0.8` +
-      `&limitEach=800` +
-      `&maxEach=5000` +
-      `&concurrency=4` +
-      `&hubPageSize=50` +
-      `&hubDelayMs=150`;
-    return `/share/map?${qs}`;
-  }, [fid, mode]);
+  // Decide whether to show “Load more”
+  const canLoadMore = useMemo(() => {
+    if (!stats) return false;
 
-  // We’ll use a simple, readable minimize/maximize icon:
-  // ▾ (collapse) / ▴ (expand)
-  const MinIcon = overlayMin ? "▴" : "▾";
+    const followerCapHit =
+      (stats.followersCount ?? 0) >= maxEach && (mode === "followers" || mode === "both");
+    const followingCapHit =
+      (stats.followingCount ?? 0) >= maxEach && (mode === "following" || mode === "both");
+
+    const capHit = followerCapHit || followingCapHit;
+    const next = nextStep(maxEach);
+
+    return capHit && next > maxEach;
+  }, [stats, mode, maxEach]);
+
+  const maxEachLabel = useMemo(() => {
+    return `Max: ${maxEach.toLocaleString()}`;
+  }, [maxEach]);
 
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
-      {/* ✅ Move Leaflet zoom controls slightly right from the edge (still on the left) */}
-      <style jsx global>{`
-        /* Keep zoom controls on LEFT, but nudge them right a bit */
-        .leaflet-top.leaflet-left {
-          left: 12px;
-          top: 12px;
-        }
-        .leaflet-left .leaflet-control {
-          margin-left: 0;
-        }
-        .leaflet-top .leaflet-control {
-          margin-top: 0;
-        }
-      `}</style>
-
       {/* UI Overlay */}
       <div
         style={{
           position: "absolute",
           zIndex: 1000,
           top: 12,
-          // ✅ sits to the right of the zoom controls area
           left: 56,
-          padding: overlayMin ? 8 : 10,
-          borderRadius: overlayMin ? 999 : 12,
+          padding: 10,
+          borderRadius: 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: overlayMin ? 220 : 420,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          cursor: overlayMin ? "pointer" : "default",
-          userSelect: "none",
-        }}
-        onClick={() => {
-          if (overlayMin) setOverlayMin(false);
+          maxWidth: 520,
         }}
       >
-        {/* Left side: title */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ fontWeight: 800, lineHeight: 1 }}>{overlayMin ? "Far Maps" : "Far Maps"}</div>
+        <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+          <div style={{ fontWeight: 800 }}>Far Maps</div>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>{maxEachLabel}</div>
+          {stats?.cache?.users ? (
+            <div style={{ marginLeft: "auto", fontSize: 11, opacity: 0.7 }}>
+              cache L1 {stats.cache.users.cacheHitsL1 ?? 0} • redis {stats.cache.users.cacheHitsRedis ?? 0} • fetched{" "}
+              {stats.cache.users.fetchedCount ?? 0}
+            </div>
+          ) : null}
+        </div>
 
-            {/* Minimize / maximize button (always visible) */}
-            <button
-              type="button"
-              aria-label={overlayMin ? "Expand" : "Minimize"}
-              onClick={(e) => {
-                e.stopPropagation();
-                setOverlayMin((v) => !v);
+        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
+            Following
+          </ToggleButton>
+          <ToggleButton active={mode === "followers"} onClick={() => setMode("followers")}>
+            Followers
+          </ToggleButton>
+          <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
+            Both
+          </ToggleButton>
+
+          {/* SHARE BUTTON */}
+          <ToggleButton
+            active={false}
+            onClick={() => {
+              if (!fid) return;
+
+              const qs =
+                `fid=${fid}` +
+                `&mode=${mode}` +
+                `&minScore=${minScore}` +
+                `&limitEach=800` +
+                `&maxEach=${maxEach}` +
+                `&concurrency=${concurrency}` +
+                `&hubPageSize=${hubPageSize}` +
+                `&hubDelayMs=${hubDelayMs}`;
+
+              window.location.href = `/share/map?${qs}`;
+            }}
+          >
+            Share
+          </ToggleButton>
+
+          {/* Progressive controls */}
+          {canLoadMore ? (
+            <ToggleButton
+              active={false}
+              onClick={() => {
+                if (loading) return;
+                setAutoLoad(false);
+                setMaxEach(nextStep(maxEach));
               }}
-              style={{
-                marginLeft: "auto",
-                width: 28,
-                height: 28,
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.22)",
-                background: "rgba(255,255,255,0.10)",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 900,
-                lineHeight: "26px",
-                padding: 0,
-              }}
-              title={overlayMin ? "Expand" : "Minimize"}
             >
-              {MinIcon}
-            </button>
-          </div>
+              Load more
+            </ToggleButton>
+          ) : null}
 
-          {/* Expanded content */}
-          {!overlayMin ? (
+          {/* Auto-load (ramps 5k → 10k → 20k → 50k with delays) */}
+          {canLoadMore ? (
+            <ToggleButton
+              active={autoLoad}
+              onClick={() => {
+                if (loading) return;
+                setAutoLoad((v) => !v);
+              }}
+            >
+              {autoLoad ? "Auto-loading…" : "Auto-load to 50k"}
+            </ToggleButton>
+          ) : null}
+        </div>
+
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
+          {fid ? `FID: ${fid}` : "Open inside Warpcast"}
+          {stats ? (
             <>
-              <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
-                  Following
-                </ToggleButton>
-                <ToggleButton active={mode === "followers"} onClick={() => setMode("followers")}>
-                  Followers
-                </ToggleButton>
-                <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
-                  Both
-                </ToggleButton>
-
-                {/* ✅ SHARE BUTTON */}
-                <ToggleButton
-                  active={false}
-                  onClick={() => {
-                    if (!fid) return;
-                    window.location.href = shareUrl;
-                  }}
-                >
-                  Share
-                </ToggleButton>
-              </div>
-
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
-                {fid ? `FID: ${fid}` : "Open inside Warpcast"}
-              </div>
-
-              {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
+              {" • "}
+              followers {stats.followersCount.toLocaleString()} • following {stats.followingCount.toLocaleString()} • pins{" "}
+              {stats.count.toLocaleString()}
             </>
           ) : null}
         </div>
+
+        {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
       </div>
 
       {/* Loading overlay */}
@@ -303,6 +333,30 @@ export default function HomePage() {
       <div style={{ height: "100%", width: "100%" }}>
         <LeafletMap center={center} zoom={points.length ? 3 : 2} points={points} />
       </div>
+
+      {/* Debug */}
+      {DEBUG ? (
+        <pre
+          style={{
+            position: "absolute",
+            zIndex: 9999,
+            bottom: 10,
+            left: 10,
+            maxWidth: 520,
+            maxHeight: 240,
+            overflow: "auto",
+            background: "rgba(0,0,0,0.7)",
+            color: "white",
+            padding: 10,
+            borderRadius: 12,
+            fontSize: 11,
+          }}
+        >
+          {ctxStatus}
+          {"\n"}
+          {ctxJson}
+        </pre>
+      ) : null}
     </main>
   );
 }
@@ -318,10 +372,7 @@ function ToggleButton({
 }) {
   return (
     <button
-      onClick={(e) => {
-        e.stopPropagation(); // ✅ don’t toggle overlay when clicking buttons
-        onClick();
-      }}
+      onClick={onClick}
       type="button"
       style={{
         border: "1px solid rgba(255,255,255,0.22)",
