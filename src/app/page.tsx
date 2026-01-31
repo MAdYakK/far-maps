@@ -137,7 +137,7 @@ export default function HomePage() {
 
         const res = await fetch(url, { signal: controller.signal });
 
-        // Optional “step” update (feels nicer)
+        // Optional step update (purely cosmetic)
         setLoadingStage("Hydrating profiles…");
 
         const text = await res.text();
@@ -179,14 +179,13 @@ export default function HomePage() {
     return `/share/map?${qs}`;
   }, [fid, mode]);
 
-  // Simple, readable minimize/maximize icon:
-  // ▾ (collapse) / ▴ (expand)
   const MinIcon = overlayMin ? "▴" : "▾";
 
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
-      {/* ✅ Keep zoom controls on LEFT, but nudge them right a bit */}
+      {/* ✅ Global styles (ONLY ONCE — fixes Turbopack nested styled-jsx error) */}
       <style jsx global>{`
+        /* Keep zoom controls on LEFT, but nudge them right a bit */
         .leaflet-top.leaflet-left {
           left: 12px;
           top: 12px;
@@ -197,6 +196,23 @@ export default function HomePage() {
         .leaflet-top .leaflet-control {
           margin-top: 0;
         }
+
+        @keyframes farmapsBar {
+          0% {
+            left: -40%;
+          }
+          50% {
+            left: 30%;
+          }
+          100% {
+            left: 100%;
+          }
+        }
+        @keyframes farmapsSpin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
       `}</style>
 
       {/* UI Overlay */}
@@ -205,7 +221,7 @@ export default function HomePage() {
           position: "absolute",
           zIndex: 1000,
           top: 12,
-          left: 56, // sits to the right of the zoom controls
+          left: 56,
           padding: overlayMin ? 8 : 10,
           borderRadius: overlayMin ? 999 : 12,
           background: "rgba(0,0,0,0.55)",
@@ -225,7 +241,6 @@ export default function HomePage() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ fontWeight: 800, lineHeight: 1 }}>Far Maps</div>
 
-            {/* Minimize / maximize button (always visible) */}
             <button
               type="button"
               aria-label={overlayMin ? "Expand" : "Minimize"}
@@ -252,7 +267,6 @@ export default function HomePage() {
             </button>
           </div>
 
-          {/* Expanded content */}
           {!overlayMin ? (
             <>
               <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -316,7 +330,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* ✅ Loading overlay with text + loading bar */}
+      {/* Loading overlay (text + loading bar) */}
       {loading && (
         <div
           style={{
@@ -344,7 +358,6 @@ export default function HomePage() {
             <div style={{ fontWeight: 800, fontSize: 14 }}>{loadingStage || "Loading…"}</div>
 
             <div style={{ marginTop: 10 }}>
-              {/* Indeterminate bar */}
               <div
                 style={{
                   position: "relative",
@@ -367,7 +380,6 @@ export default function HomePage() {
                 />
               </div>
 
-              {/* Little spinner row */}
               <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, opacity: 0.95 }}>
                 <div
                   style={{
@@ -382,25 +394,6 @@ export default function HomePage() {
                 <div style={{ fontSize: 12, opacity: 0.9 }}>Please wait…</div>
               </div>
             </div>
-
-            <style jsx global>{`
-              @keyframes farmapsBar {
-                0% {
-                  left: -40%;
-                }
-                50% {
-                  left: 30%;
-                }
-                100% {
-                  left: 100%;
-                }
-              }
-              @keyframes farmapsSpin {
-                to {
-                  transform: rotate(360deg);
-                }
-              }
-            `}</style>
           </div>
         </div>
       )}
@@ -425,7 +418,7 @@ function ToggleButton({
   return (
     <button
       onClick={(e) => {
-        e.stopPropagation(); // ✅ don’t toggle overlay when clicking buttons
+        e.stopPropagation();
         onClick();
       }}
       type="button"
