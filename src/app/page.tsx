@@ -61,6 +61,9 @@ export default function HomePage() {
   const [ctxJson, setCtxJson] = useState<string>("");
   const [ctxStatus, setCtxStatus] = useState<string>("");
 
+  // ✅ overlay minimize state
+  const [overlayMin, setOverlayMin] = useState(false);
+
   const abortRef = useRef<AbortController | null>(null);
 
   // ─────────────────────────────────────────────
@@ -153,63 +156,130 @@ export default function HomePage() {
     return [20, 0];
   }, [points]);
 
+  const shareUrl = useMemo(() => {
+    if (!fid) return "";
+    const qs =
+      `fid=${fid}` +
+      `&mode=${mode}` +
+      `&minScore=0.8` +
+      `&limitEach=800` +
+      `&maxEach=5000` +
+      `&concurrency=4` +
+      `&hubPageSize=50` +
+      `&hubDelayMs=150`;
+    return `/share/map?${qs}`;
+  }, [fid, mode]);
+
+  // We’ll use a simple, readable minimize/maximize icon:
+  // ▾ (collapse) / ▴ (expand)
+  const MinIcon = overlayMin ? "▴" : "▾";
+
   return (
     <main style={{ height: "100vh", width: "100vw" }}>
+      {/* ✅ Move Leaflet zoom controls slightly right from the edge (still on the left) */}
+      <style jsx global>{`
+        /* Keep zoom controls on LEFT, but nudge them right a bit */
+        .leaflet-top.leaflet-left {
+          left: 12px;
+          top: 12px;
+        }
+        .leaflet-left .leaflet-control {
+          margin-left: 0;
+        }
+        .leaflet-top .leaflet-control {
+          margin-top: 0;
+        }
+      `}</style>
+
       {/* UI Overlay */}
       <div
         style={{
           position: "absolute",
           zIndex: 1000,
           top: 12,
+          // ✅ sits to the right of the zoom controls area
           left: 56,
-          padding: 10,
-          borderRadius: 12,
+          padding: overlayMin ? 8 : 10,
+          borderRadius: overlayMin ? 999 : 12,
           background: "rgba(0,0,0,0.55)",
           color: "white",
-          maxWidth: 420,
+          maxWidth: overlayMin ? 220 : 420,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          cursor: overlayMin ? "pointer" : "default",
+          userSelect: "none",
+        }}
+        onClick={() => {
+          if (overlayMin) setOverlayMin(false);
         }}
       >
-        <div style={{ fontWeight: 700 }}>Far Maps</div>
+        {/* Left side: title */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontWeight: 800, lineHeight: 1 }}>{overlayMin ? "Far Maps" : "Far Maps"}</div>
 
-        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
-            Following
-          </ToggleButton>
-          <ToggleButton active={mode === "followers"} onClick={() => setMode("followers")}>
-            Followers
-          </ToggleButton>
-          <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
-            Both
-          </ToggleButton>
+            {/* Minimize / maximize button (always visible) */}
+            <button
+              type="button"
+              aria-label={overlayMin ? "Expand" : "Minimize"}
+              onClick={(e) => {
+                e.stopPropagation();
+                setOverlayMin((v) => !v);
+              }}
+              style={{
+                marginLeft: "auto",
+                width: 28,
+                height: 28,
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.22)",
+                background: "rgba(255,255,255,0.10)",
+                color: "white",
+                cursor: "pointer",
+                fontWeight: 900,
+                lineHeight: "26px",
+                padding: 0,
+              }}
+              title={overlayMin ? "Expand" : "Minimize"}
+            >
+              {MinIcon}
+            </button>
+          </div>
 
-          {/* ✅ SHARE BUTTON */}
-          <ToggleButton
-            active={false}
-            onClick={() => {
-              if (!fid) return;
+          {/* Expanded content */}
+          {!overlayMin ? (
+            <>
+              <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <ToggleButton active={mode === "following"} onClick={() => setMode("following")}>
+                  Following
+                </ToggleButton>
+                <ToggleButton active={mode === "followers"} onClick={() => setMode("followers")}>
+                  Followers
+                </ToggleButton>
+                <ToggleButton active={mode === "both"} onClick={() => setMode("both")}>
+                  Both
+                </ToggleButton>
 
-              const qs =
-                `fid=${fid}` +
-                `&mode=${mode}` +
-                `&minScore=0.8` +
-                `&limitEach=800` +
-                `&maxEach=5000` +
-                `&concurrency=4` +
-                `&hubPageSize=50` +
-                `&hubDelayMs=150`;
+                {/* ✅ SHARE BUTTON */}
+                <ToggleButton
+                  active={false}
+                  onClick={() => {
+                    if (!fid) return;
+                    window.location.href = shareUrl;
+                  }}
+                >
+                  Share
+                </ToggleButton>
+              </div>
 
-              window.location.href = `/share/map?${qs}`;
-            }}
-          >
-            Share
-          </ToggleButton>
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
+                {fid ? `FID: ${fid}` : "Open inside Warpcast"}
+              </div>
+
+              {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
+            </>
+          ) : null}
         </div>
-
-        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
-          {fid ? `FID: ${fid}` : "Open inside Warpcast"}
-        </div>
-
-        {error && <div style={{ marginTop: 6, fontSize: 12, color: "#ffb4b4" }}>{error}</div>}
       </div>
 
       {/* Loading overlay */}
@@ -248,7 +318,10 @@ function ToggleButton({
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={(e) => {
+        e.stopPropagation(); // ✅ don’t toggle overlay when clicking buttons
+        onClick();
+      }}
       type="button"
       style={{
         border: "1px solid rgba(255,255,255,0.22)",
