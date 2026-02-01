@@ -25,6 +25,9 @@ const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as c
 // Miniapp link to include in shares
 const MINIAPP_LINK = "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps";
 
+// ✅ Share text used everywhere
+const SHARE_TEXT = "I got my FarMap! Check out yours!";
+
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
   {
@@ -188,6 +191,9 @@ export default function ShareMapPage() {
   const [sharePopupOpen, setSharePopupOpen] = useState(false);
   const [sharingMinted, setSharingMinted] = useState(false);
 
+  // ✅ New: sharing state for the standalone Share button
+  const [sharingCurrent, setSharingCurrent] = useState(false);
+
   // Already minted overlay
   const [alreadyMintedOpen, setAlreadyMintedOpen] = useState(false);
 
@@ -266,7 +272,7 @@ export default function ShareMapPage() {
     try {
       setSharingMinted(true);
       await sdk.actions.composeCast({
-        text: "I got my FarMap! Check out yours!",
+        text: SHARE_TEXT,
         embeds: [mintedImageUrl, MINIAPP_LINK],
       });
       setSharePopupOpen(false);
@@ -284,7 +290,7 @@ export default function ShareMapPage() {
     try {
       setSharingMinted(true);
       await sdk.actions.composeCast({
-        text: "I got my FarMap! Check out yours!",
+        text: SHARE_TEXT,
         embeds: [imageAbsolute, MINIAPP_LINK],
       });
       setAlreadyMintedOpen(false);
@@ -292,6 +298,24 @@ export default function ShareMapPage() {
       setMintErr(e?.message || "Failed to share");
     } finally {
       setSharingMinted(false);
+    }
+  }
+
+  // ✅ New: standalone Share button (shares current map image + miniapp link + same text)
+  async function shareButtonCast() {
+    if (!imageAbsolute) return;
+
+    try {
+      setMintErr("");
+      setSharingCurrent(true);
+      await sdk.actions.composeCast({
+        text: SHARE_TEXT,
+        embeds: [imageAbsolute, MINIAPP_LINK],
+      });
+    } catch (e: any) {
+      setMintErr(e?.message || "Failed to share");
+    } finally {
+      setSharingCurrent(false);
     }
   }
 
@@ -564,6 +588,14 @@ export default function ShareMapPage() {
 
           <BubbleButton onClick={mintNow} disabled={!fid || minting || imgOk === false || loadingImg}>
             {minting ? "Minting…" : "Mint & Share"}
+          </BubbleButton>
+
+          {/* ✅ New Share button */}
+          <BubbleButton
+            onClick={shareButtonCast}
+            disabled={!fid || !imageAbsolute || imgOk === false || loadingImg || sharingCurrent || minting}
+          >
+            {sharingCurrent ? "Sharing…" : "Share"}
           </BubbleButton>
 
           <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>{topRightLabel}</div>
