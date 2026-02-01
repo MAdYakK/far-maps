@@ -38,6 +38,33 @@ function escapeHtml(s: string) {
 const WORLD_BOUNDS = L.latLngBounds(L.latLng(-85, -180), L.latLng(85, 180));
 
 /* ──────────────────────────────────────────────────────────────
+   ✅ Detect touch/coarse pointer (mobile/tablet) vs mouse/fine pointer (desktop)
+   ────────────────────────────────────────────────────────────── */
+function useIsCoarsePointer() {
+  const [coarse, setCoarse] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const mql = window.matchMedia("(pointer: coarse)");
+    const update = () => setCoarse(!!mql.matches);
+
+    update();
+
+    // Safari fallback (older)
+    if (mql.addEventListener) mql.addEventListener("change", update);
+    else mql.addListener(update);
+
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener("change", update);
+      else mql.removeListener(update);
+    };
+  }, []);
+
+  return coarse;
+}
+
+/* ──────────────────────────────────────────────────────────────
    Icon caches (persist per warm instance)
    ────────────────────────────────────────────────────────────── */
 
@@ -198,6 +225,8 @@ export default function LeafletMap({
     fixLeafletIcons();
   }, []);
 
+  const isCoarsePointer = useIsCoarsePointer();
+
   const markerData = useMemo(() => {
     return points.map((p) => ({
       key: `${p.lat},${p.lng}`,
@@ -219,9 +248,9 @@ export default function LeafletMap({
       maxZoom={8}
       // ✅ IMPORTANT: allow pan, disable gesture zoom
       dragging={true}
-      scrollWheelZoom={false}   // disables mouse wheel + trackpad pinch-to-zoom behavior
-      touchZoom={false}         // disables pinch zoom on mobile
-      doubleClickZoom={false}   // disables double-tap zoom
+      scrollWheelZoom={!isCoarsePointer} // ✅ desktop mouse/trackpad only
+      touchZoom={false} // ✅ keep pinch zoom disabled
+      doubleClickZoom={false} // ✅ keep double-tap zoom disabled
       boxZoom={false}
       keyboard={false}
       // ✅ keep +/- controls (default true)
