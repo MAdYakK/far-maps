@@ -26,7 +26,7 @@ const DEV_MULTI_MINT_ADDRESS = "0xfa3Ce274F05bB01B8dC85a9DFF96CaE8c5c869e6" as c
 const MINIAPP_LINK = "https://farcaster.xyz/miniapps/g1hRkzaqCGOG/farmaps";
 
 // ✅ Share text used everywhere
-const SHARE_TEXT = "I got my FarMap! Check out yours!";
+const SHARE_TEXT = "I got my FarMap by @madyak! Check out yours!";
 
 // FarMapsMint ABI (only what we need)
 const farMapsMintAbi = [
